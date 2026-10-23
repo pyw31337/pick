@@ -212,6 +212,16 @@
     if (contrastFails) issues.push({ level: 'warn', title: '대비가 낮은 텍스트가 있습니다', detail: `${contrastChecks}개 텍스트 조합 중 ${contrastFails}개가 WCAG AA 기준보다 낮습니다.` });
     if (componentStyles.length > 5 && componentStyles[0].count > componentStyles[1]?.count * 4) issues.push({ level: 'info', title: '컴포넌트 스타일 편차가 큽니다', detail: '버튼·링크 계열의 반복 스타일이 여러 조합으로 나뉘어 있습니다.' });
     const consistency = Math.max(0, Math.min(100, 100 - Math.min(48, Math.max(0, uniqueColors - 8) * 2) - Math.min(28, Math.max(0, uniqueTypes - 6) * 2) - Math.min(18, contrastFails) + Math.min(12, repeatedColors) + Math.min(8, repeatedTypes)));
+    const clampScore = value => Math.max(0, Math.min(100, Math.round(value)));
+    const health = [
+      { key: 'typography', label: 'Typography', score: clampScore(100 - Math.max(0, uniqueTypes - 8) * 3) },
+      { key: 'spacing', label: 'Spacing', score: clampScore(100 - Math.max(0, maps.spacing.size - 14) * 2) },
+      { key: 'components', label: 'Components', score: clampScore(100 - Math.max(0, componentStyles.length - 5) * 4) },
+      { key: 'accessibility', label: 'Accessibility', score: clampScore(100 - contrastFails * 8) },
+      { key: 'colors', label: 'Color system', score: clampScore(100 - Math.max(0, uniqueColors - 12) * 2) },
+      { key: 'layout', label: 'Layout', score: clampScore(100 - Math.max(0, radii.length - 10) * 2) },
+      { key: 'interaction', label: 'Interaction', score: 100 }
+    ];
     const css = [
       ':root {',
       ...colors.slice(0, 12).map((row, i) => `  --lp-color-${i + 1}: ${row.value};`),
@@ -220,7 +230,7 @@
       ...spacing.slice(0, 8).map((row, i) => `  --lp-space-${i + 1}: ${row.value};`),
       '}'
     ].join('\n');
-    const tokens = { colors, gradients, typography, spacing, radii, shadows, components: componentStyles, frameworks, contrast: { checks: contrastChecks, failures: contrastFails }, inspected, score: consistency, issues };
+    const tokens = { colors, gradients, typography, spacing, radii, shadows, components: componentStyles, frameworks, contrast: { checks: contrastChecks, failures: contrastFails }, health, inspected, score: consistency, issues };
     const tailwind = `/** Let's Pick design tokens */\nexport default {\n  theme: { extend: {\n    colors: ${JSON.stringify(Object.fromEntries(colors.slice(0, 12).map((row, i) => [`lp-${i + 1}`, row.value])), null, 2)},\n    borderRadius: ${JSON.stringify(Object.fromEntries(radii.slice(0, 6).map((row, i) => [`lp-${i + 1}`, row.value])), null, 2)}\n  }}\n}`;
     return { ...tokens, css, tailwind, json: JSON.stringify(tokens, null, 2) };
   }
@@ -2744,6 +2754,10 @@
       actions.append(actionButton('primary', 'CSS 토큰 복사', () => copy(data.css), 'code'));
       actions.append(actionButton('normal', 'JSON 저장', () => downloadBlob(new Blob([data.json], { type: 'application/json' }), `${location.hostname.replace(/^www\\./, '')}-design-tokens.json`), 'save'));
       actions.append(actionButton('normal', 'Tailwind 복사', () => copy(data.tailwind), 'code'));
+      actions.append(actionButton('normal', '화면 색상 픽커', async button => {
+        if (!('EyeDropper' in window)) { toast('이 브라우저는 화면 색상 픽커를 지원하지 않습니다.', 'error'); return; }
+        try { const result = await new EyeDropper().open(); copy(result.sRGBHex, button); } catch { /* 사용자가 취소 */ }
+      }, 'palette'));
       main.append(actions);
       const summary = document.createElement('div');
       summary.className = 'sl-design-summary';
@@ -2755,6 +2769,10 @@
       context.className = 'sl-design-context';
       context.innerHTML = `<span>${iconSvg('terminal')}<b>감지 스택</b> ${esc((data.frameworks || []).join(' · ') || '프레임워크 신호 없음')}</span><span>${iconSvg('audit')}<b>대비</b> ${esc(`${data.contrast?.failures || 0}건 이슈 / ${data.contrast?.checks || 0}건 검사`)}</span>`;
       main.append(context);
+      const health = document.createElement('section'); health.className = 'sl-health-section';
+      const hh = document.createElement('h3'); hh.innerHTML = `${iconSvg('audit')}<span>디자인 건강도</span><small>${data.health?.length || 0}개 기준</small>`; health.append(hh);
+      (data.health || []).forEach(row => { const item = document.createElement('div'); item.className = 'sl-health-row'; item.innerHTML = `<span>${esc(row.label)}</span><i><b style="width:${Math.max(0, Math.min(100, row.score))}%"></b></i><strong>${esc(String(row.score))}</strong>`; health.append(item); });
+      main.append(health);
       const section = (title, icon, rows, renderRow) => {
         const box = document.createElement('section'); box.className = 'sl-token-section';
         const h = document.createElement('h3'); h.innerHTML = `${iconSvg(icon)}<span>${esc(title)}</span><small>${rows?.length || 0}</small>`; box.append(h);

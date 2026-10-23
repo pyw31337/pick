@@ -1,4 +1,4 @@
-# Let's Pick 1.4.1
+# Let's Pick 1.4.2
 
 웹페이지의 **이미지·영상·SVG·글꼴 원본 주소**와 렌더링된 **디자인 토큰**을 찾아 보여주고, 골라서 저장하는 Chromium 확장 프로그램 **렛츠 픽(Let's Pick)** 입니다.
 (Chrome, Whale, Edge, Brave, Vivaldi)
@@ -27,6 +27,11 @@
 - 단축키는 `chrome://extensions/shortcuts` 또는 설정(⚙) 화면에서 바꿀 수 있습니다.
 - **영상 저장**: 영상 위에서 ⌥+클릭하거나 「영상」 탭을 열면, 영상마다 저장 방법(원본 파일 / DASH → MP4 / HLS → MP4 / 녹화 / DRM 보호)과 화질, 설명이 나옵니다. 맨 위 항목이 가장 좋은 방법입니다.
 - 설정(⚙): Alt+클릭 켜기/끄기, Alt+클릭한 영상 바로 저장, 패널 위치(왼쪽/오른쪽), 저장 폴더 이름.
+
+## 1.4.2 변경 내역 (2026-10-24) — 건강도·화면 색상 픽커 추가
+
+- Peek의 Design Health 흐름을 참고해 Typography·Spacing·Components·Accessibility·Color·Layout·Interaction별 점수를 표시
+- 브라우저 `EyeDropper` API를 이용한 화면 색상 픽커와 HEX 복사 추가
 
 ## 1.4.1 변경 내역 (2026-10-24) — 대비·스택·컴포넌트 감사 확장
 
