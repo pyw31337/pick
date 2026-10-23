@@ -17,7 +17,12 @@
       .note-foot .note-mark{width:18px;height:18px;margin:0;font-size:10px}
       .note-foot h3{font-size:11px;margin:0;color:#6f7a7c}
       .note-foot p{font-size:10px;line-height:1.5;margin:0;color:#899395}
+      .inline-link{color:var(--mint);font-weight:700;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px;white-space:nowrap}
+      .install-screenshot{display:grid;grid-template-columns:minmax(180px,.38fr) minmax(0,1fr);gap:24px;align-items:center;margin-top:42px;padding-top:28px;border-top:1px solid rgba(255,255,255,.12)}
+      .screenshot-kicker{font:500 10px 'DM Mono',monospace;letter-spacing:.1em;color:var(--mint)}
+      .screenshot-copy h3{font-size:20px;letter-spacing:-.05em;margin:12px 0 10px}.screenshot-copy p{font-size:12px;line-height:1.75;color:#aeb8bf;margin-bottom:16px}.install-screenshot figure{margin:0}.install-screenshot img{display:block;width:100%;height:auto;border-radius:13px;box-shadow:0 16px 32px rgba(0,0,0,.24)}.install-screenshot figcaption{font-size:10px;color:#829098;margin-top:8px}
       @media(max-width:620px){.note-foot{align-items:flex-start}.note-foot p{font-size:9px}}
+      @media(max-width:760px){.install-screenshot{grid-template-columns:1fr}.screenshot-copy p{max-width:440px}}
     </style>
   </head>
   <body>
@@ -101,8 +106,12 @@
           <div class="install-card">
             <div class="section-heading"><p class="eyebrow">GET STARTED</p><h2 id="install-title">설치부터 사용까지,<br /><em>처음 한 번만 익히면 돼요.</em></h2><p>GitHub에서 ZIP을 받고 브라우저에 불러온 뒤, 원하는 페이지에서 바로 사용하세요.</p></div>
             <div class="guide-columns">
-              <div class="guide-block"><div class="guide-label"><span class="guide-icon icon-line"><svg viewBox="0 0 32 32"><path d="M6 8h20v16H6z"/><path d="M10 12h12M10 16h8M10 20h10"/></svg></span><span>설치 방법</span></div><ol class="steps"><li><span>1</span><div><strong>ZIP 다운로드</strong><p>최신 버전 받기 버튼을 눌러 파일을 내려받습니다.</p></div></li><li><span>2</span><div><strong>압축 해제</strong><p>ZIP을 원하는 폴더에 풀어 둡니다.</p></div></li><li><span>3</span><div><strong>확장 프로그램 로드</strong><p><b>chrome://extensions</b>에서 개발자 모드를 켜고 압축해제된 확장 프로그램을 불러옵니다.</p></div></li></ol></div>
+              <div class="guide-block"><div class="guide-label"><span class="guide-icon icon-line"><svg viewBox="0 0 32 32"><path d="M6 8h20v16H6z"/><path d="M10 12h12M10 16h8M10 20h10"/></svg></span><span>설치 방법</span></div><ol class="steps"><li><span>1</span><div><strong>ZIP 다운로드</strong><p>최신 버전 받기 버튼을 눌러 파일을 내려받습니다.</p></div></li><li><span>2</span><div><strong>압축 해제</strong><p>ZIP을 원하는 폴더에 풀어 둡니다.</p></div></li><li><span>3</span><div><strong>확장 프로그램 로드</strong><p><a class="inline-link" href="chrome://extensions">chrome://extensions</a>에서 개발자 모드를 켜고 압축해제된 확장 프로그램을 불러옵니다.</p></div></li></ol></div>
               <div class="guide-block guide-use"><div class="guide-label"><span class="guide-icon icon-line"><svg viewBox="0 0 32 32"><path d="M16 4v24M4 16h24"/><circle cx="16" cy="16" r="10"/></svg></span><span>사용 방법</span></div><ol class="steps"><li><span>1</span><div><strong>웹페이지 열기</strong><p>이미지·영상·SVG가 있는 페이지로 이동합니다.</p></div></li><li><span>2</span><div><strong>Alt + 클릭</strong><p>원하는 미디어 위에서 <b>Alt</b> 키를 누른 채 클릭합니다.</p></div></li><li><span>3</span><div><strong>Let's Pick에서 처리</strong><p>탭을 고르고 URL 보기·복사·저장·변환 기능을 사용합니다.</p></div></li></ol></div>
+            </div>
+            <div class="install-screenshot">
+              <div class="screenshot-copy"><span class="screenshot-kicker">SEE IT IN ACTION</span><h3>화면은 이렇게 생겼어요.</h3><p>개발자 모드를 켠 다음, 파란색 버튼을 눌러 압축을 해제한 Let's Pick 폴더를 선택하면 설치가 끝납니다.</p><a class="inline-link" href="chrome://extensions">chrome://extensions 바로 열기 ↗</a></div>
+              <figure><img src="./assets/install-extensions.svg" alt="Chrome 확장 프로그램 관리 화면에서 개발자 모드와 압축해제된 확장 프로그램 로드 버튼을 안내하는 이미지" /><figcaption>Chrome 확장 프로그램 관리 화면 예시 · 브라우저 버전에 따라 화면 문구가 조금 다를 수 있습니다.</figcaption></figure>
             </div>
             <div class="install-actions"><a class="button button-primary" href="https://github.com/pyw31337/source-lens/archive/refs/heads/main.zip"><span class="button-icon" aria-hidden="true">↓</span> 최신 버전 받기</a><a class="text-link" href="https://github.com/pyw31337/source-lens/releases" target="_blank" rel="noreferrer">릴리스·변경 내역 보기 ↗</a></div>
           </div>
