@@ -1,7 +1,7 @@
 (function (root) {
   const SL = root.SourceLens = root.SourceLens || {};
 
-  SL.MEDIA_EXT = /\.(?:mp4|m4v|mov|webm|mkv|ogv|avi|3gp|m3u8|mpd|ts|m4s)(?:$|[?#])/i;
+  SL.MEDIA_EXT = /\.(?:mp4|m4v|mov|webm|mkv|ogv|avi|3gp|m3u8|mpd|ts|m4s|mp3|m4a|wav|ogg|oga|aac|flac)(?:$|[?#])/i;
   SL.IMAGE_EXT = /\.(?:jpe?g|png|gif|webp|avif|bmp|svg|ico|jfif|heic)(?:$|[?#])/i;
   SL.PHOTO_EXT = /\.(?:jpe?g|png|webp|avif|bmp|jfif|heic)(?:$|[?#])/i;
   SL.SIGNED = /(?:X-Amz-Signature|X-Amz-Expires|X-Amz-Credential|Key-Pair-Id|Policy=|Signature=|Expires=|oh=|oe=|_nc_ohc|_nc_ht|_nc_sid|expire=|exp=)/i;
@@ -12,7 +12,7 @@
     const trimmed = value.trim();
     if (!trimmed || trimmed === '#') return '';
     if (/^(?:javascript|vbscript|file|chrome|about):/i.test(trimmed)) return '';
-    if (/^data:/i.test(trimmed) && !/^data:image\/svg/i.test(trimmed)) return '';
+    if (/^data:/i.test(trimmed) && !/^data:image\/(?:svg|png|jpe?g|webp)/i.test(trimmed)) return '';
     try {
       const url = new URL(trimmed, base || (typeof location !== 'undefined' ? location.href : 'https://example.com/'));
       if (/^(javascript|vbscript|file|chrome|about):/i.test(url.protocol)) return '';

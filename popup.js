@@ -1,6 +1,21 @@
 const api = globalThis.chrome;
 const SL = globalThis.SourceLens;
 const $ = s => document.querySelector(s);
+const POPUP_ICONS = {
+  save: '<path d="M6 3h17l5 5v21H6V3Z"/><path d="M10 4v9h11V4h-4v5h-4V4h-3Zm1 14h10v8H11v-8Z" fill="#1c1c1c"/>',
+  copy: '<path d="M9 8h13a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3V11a3 3 0 0 1 3-3Z"/><path d="M5 21H4a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3h13a3 3 0 0 1 3 3v1h-4V6H5v15Z"/>',
+  open: '<path d="M15 4h13v13h-4V11l-11 11-3-3 11-11h-6V4Z"/><path d="M5 5h8v4H9v14h14v-4h4v8H5V5Z"/>',
+  video: '<path d="M4 6h16a3 3 0 0 1 3 3v2l6-4v18l-6-4v2a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3Z"/><path d="m12 11 7 5-7 5v-10Z" fill="#1c1c1c"/>',
+  code: '<path d="m12 5 3 3-6 6 6 6-3 3-9-9 9-9Zm8 0 9 9-9 9-3-3 6-6-6-6 3-3Z"/>',
+  zip: '<path d="M6 3h22v26H6V3Zm5 4v4h4V7h-4Zm4 4v4h4v-4h-4Zm-4 6v4h8v-4h-8Zm0 7h8v4h-8v-4Z"/>',
+  list: '<path d="M5 5h5v5H5V5Zm0 9h5v5H5v-5Zm0 9h5v5H5v-5Zm8-18h14v5H13V5Zm0 9h14v5H13v-5Zm0 9h14v5H13v-5Z"/>'
+};
+function popupIcon(name) { return `<svg class="btn-icon filled-icon" viewBox="0 0 32 32" aria-hidden="true">${POPUP_ICONS[name] || POPUP_ICONS.list}</svg>`; }
+function setButtonText(button, text) {
+  if (!button) return;
+  const label = button.querySelector?.('.btn-label');
+  if (label) label.textContent = text; else button.textContent = text;
+}
 const state = {
   tab: null,
   data: { images: [], videos: [], svgs: [] },
@@ -96,11 +111,12 @@ function updateFooter() {
   const list = visible();
   const { chosen } = targets();
   const n = chosen || list.length;
-  $('#download').textContent = `저장 (${n})`;
-  $('#zip').textContent = `ZIP (${Math.min(n, 40)})`;
+  setButtonText($('#download'), `저장 (${n})`);
+  setButtonText($('#zip'), `ZIP (${Math.min(n, 40)})`);
   $('#zip').hidden = state.view === 'videos';
-  $('#copy').textContent = state.view === 'svgs' ? `코드 복사 (${n})` : `URL 복사 (${n})`;
-  ['#download', '#zip', '#copy'].forEach(sel => { $(sel).disabled = !list.length; });
+  setButtonText($('#copy'), state.view === 'svgs' ? `코드 복사 (${n})` : `URL 복사 (${n})`);
+  setButtonText($('#meta'), `메타 CSV (${n})`);
+  ['#download', '#zip', '#copy', '#meta'].forEach(sel => { $(sel).disabled = !list.length; });
   const all = $('#selectAll');
   all.checked = list.length > 0 && chosen === list.length;
   all.indeterminate = chosen > 0 && chosen < list.length;
@@ -119,6 +135,16 @@ function emptyMessage() {
 
 function thumb(item) {
   if (item.type === 'video') {
+    if (item.poster) {
+      const img = document.createElement('img');
+      img.className = 'thumb video-thumb';
+      img.src = item.poster;
+      img.alt = item.title || item.source || '영상 썸네일';
+      img.loading = 'lazy';
+      img.referrerPolicy = 'no-referrer-when-downgrade';
+      img.onerror = () => { img.remove(); };
+      return img;
+    }
     const box = document.createElement('div');
     box.className = 'thumb video-thumb';
     box.textContent = item.temporary ? '▶ 세션 영상' : item.stream ? '▶ 스트림' : '▶ 영상';
@@ -162,7 +188,7 @@ function render() {
   if (state.view === 'videos') {
     const help = document.createElement('p');
     help.className = 'vhelp';
-    help.textContent = '위에서부터 추천 순서입니다. 원본 파일 → 스트림 합치기(DASH/HLS) → 녹화 순으로 좋아요.';
+    help.textContent = '위에서부터 추천 순서입니다. 원본 파일, 스트림 합치기(DASH/HLS), 녹화 순으로 추천합니다.';
     listEl.append(help);
     list.forEach(item => listEl.append(videoRow(item)));
     updateFooter();
@@ -195,17 +221,17 @@ function render() {
     tile.append(meta);
     const actions = document.createElement('div');
     actions.className = 'actions';
-    const mk = (label, title, fn) => {
+    const mk = (label, title, fn, icon) => {
       const b = document.createElement('button');
       b.type = 'button';
-      b.textContent = label;
+      b.innerHTML = `${popupIcon(icon)}<span class="btn-label">${SL.esc(label)}</span>`;
       b.title = title;
       b.onclick = ev => { ev.stopPropagation(); fn(b); };
       actions.append(b);
     };
-    mk('저장', '이 파일 저장', () => saveItems([item]));
-    mk(item.type === 'svg' ? '코드' : '복사', item.type === 'svg' ? 'SVG 코드 복사' : 'URL 복사', b => copyText(item.type === 'svg' && item.code ? item.code : item.url, b));
-    if (!/^data:|^blob:/i.test(item.url)) mk('열기', '새 탭에서 열기', () => api.tabs.create({ url: item.url, active: false }));
+    mk('저장', '이 파일 저장', () => saveItems([item]), 'save');
+    mk(item.type === 'svg' ? '코드' : '복사', item.type === 'svg' ? 'SVG 코드 복사' : 'URL 복사', b => copyText(item.type === 'svg' && item.code ? item.code : item.url, b), item.type === 'svg' ? 'code' : 'copy');
+    if (!/^data:|^blob:/i.test(item.url)) mk('열기', '새 탭에서 열기', () => api.tabs.create({ url: item.url, active: false }), 'open');
     tile.append(actions);
     listEl.append(tile);
   });
@@ -236,8 +262,17 @@ function videoRow(item) {
   badge.className = `vbadge k-${item.kind}`;
   badge.textContent = item.badge || item.kind;
   const facts = document.createElement('b');
-  facts.textContent = [item.quality, item.codec, item.audio === true ? '소리 포함' : item.audio === false ? '소리 없음' : '', item.duration ? fmtClock(item.duration) : '', item.playing ? '지금 보는 영상' : '', item.frameId ? '프레임' : ''].filter(Boolean).join(' · ') || item.source || '';
+  facts.textContent = [item.audioOnly ? '오디오' : item.quality, item.codec, item.audio === true ? '소리 포함' : item.audio === false ? '소리 없음' : '', item.duration ? fmtClock(item.duration) : '', item.playing ? '지금 보는 영상' : '', item.frameId ? '프레임' : ''].filter(Boolean).join(' · ') || item.source || '';
   head.append(box, badge, facts);
+  const poster = item.poster ? document.createElement('img') : null;
+  if (poster) {
+    poster.className = 'video-row-thumb';
+    poster.src = item.poster;
+    poster.alt = item.title || item.source || '영상 썸네일';
+    poster.loading = 'lazy';
+    poster.referrerPolicy = 'no-referrer-when-downgrade';
+    poster.onerror = () => poster.remove();
+  }
   const note = document.createElement('p');
   note.className = 'vnote';
   note.textContent = item.note || '';
@@ -246,18 +281,18 @@ function videoRow(item) {
   const main = document.createElement('button');
   main.type = 'button';
   main.className = 'brand';
-  main.textContent = BTN[item.kind] || '저장';
+  main.innerHTML = `${popupIcon(item.kind === 'record' ? 'video' : 'save')}<span class="btn-label">${SL.esc(BTN[item.kind] || '저장')}</span>`;
   main.disabled = item.kind === 'drm';
   main.onclick = () => saveVideo(item, main);
   actions.append(main);
   if (item.url) {
     const c = document.createElement('button');
     c.type = 'button';
-    c.textContent = '주소 복사';
+    c.innerHTML = `${popupIcon('copy')}<span class="btn-label">주소 복사</span>`;
     c.onclick = () => copyText(item.url, c);
     actions.append(c);
   }
-  row.append(head, note, actions);
+  row.append(...(poster ? [poster] : []), head, note, actions);
   return row;
 }
 
@@ -265,9 +300,9 @@ async function saveVideo(item, button) {
   const tab = state.tab || await activeTab();
   if (item.kind === 'drm') { setStatus(item.note, 'error'); return { ok: false }; }
   if (item.kind === 'direct') {
-    if (button) button.textContent = '확인 중…';
+    if (button) setButtonText(button, '확인 중…');
     const res = await sendMessage({ type: 'downloadUrl', url: item.url, filename: `lets-pick/${item.file || 'video.mp4'}` });
-    if (button) button.textContent = res.ok ? '저장됨 ✓' : '실패';
+    if (button) setButtonText(button, res.ok ? '저장됨' : '실패');
     setStatus(res.ok ? `원본 영상 저장을 시작했습니다 · ${item.file || ''}` : `원본 주소가 거절됐습니다 (${res.error || ''}). 페이지를 새로고침하거나 아래 다른 방법을 써 보세요.`, res.ok ? '' : 'error');
     return res;
   }
@@ -295,9 +330,9 @@ async function copyText(text, button) {
   try {
     await navigator.clipboard.writeText(text);
     if (button) {
-      const prev = button.textContent;
-      button.textContent = '✓';
-      setTimeout(() => { button.textContent = prev; }, 1000);
+      const prev = button.querySelector?.('.btn-label')?.textContent || button.textContent;
+      setButtonText(button, '완료');
+      setTimeout(() => { setButtonText(button, prev); }, 1000);
     }
     setStatus('복사했습니다.');
   } catch (e) {
@@ -374,7 +409,7 @@ async function load() {
   } catch (error) {
     state.data = { images: [], videos: [], svgs: [] };
     render();
-    setStatus(`이 페이지를 읽지 못했습니다. 페이지를 새로고침(⌘R / F5)한 뒤 다시 열어 주세요. (${error.message || error})`, 'error');
+    setStatus(`이 페이지를 읽지 못했습니다. 페이지를 새로고침(Cmd+R / F5)한 뒤 다시 열어 주세요. (${error.message || error})`, 'error');
   }
 }
 
@@ -403,6 +438,26 @@ $('#copy').onclick = () => {
   const urls = list.map(i => i.url).filter(u => u && !/^data:/i.test(u));
   if (!urls.length) return setStatus('복사할 URL이 없습니다.', 'error');
   copyText(urls.join('\n')).then(() => setStatus(`${urls.length}개 URL을 복사했습니다.`));
+};
+$('#meta').onclick = () => {
+  const { list } = targets();
+  if (!list.length) return;
+  const csvCell = value => `"${String(value ?? '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
+  const rows = [['번호', '종류', '파일명', '원본 URL', '가로', '세로', '포맷', '용량', '상태', '출처']];
+  list.forEach((item, index) => rows.push([
+    index + 1, item.type || (item.kind ? 'video' : ''), item.file || item.name || 'media', item.url || '',
+    item.width || '', item.height || '', item.mime || item.ext || item.type || '',
+    item.size ? `${Math.round(item.size / 1024)} KB` : '', item.state || item.note || '', item.source || ''
+  ]));
+  const csv = '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n');
+  api.downloads.download({
+    url: `data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`,
+    filename: `lets-pick/${(state.host || 'page').replace(/^www\./, '')}-metadata.csv`,
+    saveAs: false
+  }, id => {
+    const err = api.runtime.lastError;
+    setStatus(err ? `메타데이터를 저장하지 못했습니다: ${err.message}` : `메타데이터 CSV를 저장했습니다 (${list.length}개).`, err ? 'error' : '');
+  });
 };
 $('#download').onclick = () => {
   const { list } = targets();

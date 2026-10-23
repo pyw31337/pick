@@ -10,7 +10,7 @@
   const VF = window.__slVideo;
   const MT = globalThis.SourceLensMedia;
   const state = {
-    panel: null, selected: null, contextTarget: null, selectedMedia: null, picked: null,
+    panel: null, selected: null, contextTarget: null, selectedMedia: null, picked: null, analysis: null,
     candidates: [], activeTab: 'selected', postUrl: '', capture: null, pageNet: [],
     profile: null, observer: null, scanTimer: 0, redraw: null, platformMedia: [],
     recorder: null, captureTimer: 0, videoItems: [],
@@ -85,6 +85,7 @@
   }
 
   let bgCache = { t: 0, items: [] };
+  const canvasCache = new WeakMap();
   function collectBackgrounds() {
     const now = Date.now();
     if (now - bgCache.t < 3000) return bgCache.items;
@@ -199,7 +200,12 @@
   }
 
   function refreshVideoItems() {
-    try { state.videoItems = VF ? VF.collect() : []; } catch (e) { state.videoItems = []; }
+    try {
+      state.videoItems = VF ? VF.collect().map(item => ({
+        ...item,
+        poster: item.poster || item.thumbnail || videoPoster(item)
+      })) : [];
+    } catch (e) { state.videoItems = []; }
     return state.videoItems;
   }
   if (VF) VF.onChange(() => {
@@ -245,6 +251,9 @@
       size: extra.size || 0,
       mime: extra.mime || '',
       name: extra.name || '',
+      poster: extra.poster || extra.thumbnail || '',
+      thumbnail: extra.thumbnail || extra.poster || '',
+      audioOnly: !!extra.audioOnly,
       fp: extra.fp || '',
       relation: extra.relation || 'target',
       rewritten
@@ -331,6 +340,11 @@
       found.push(media);
     }
     if (found[0]) return found[0];
+    // Prefer the element actually under the pointer. Falling back to an image
+    // hundreds of pixels away made text/background Alt+clicks inspect the wrong
+    // card on dense feeds and detail pages.
+    const top = stack[0];
+    if (top && !/^(HTML|BODY)$/i.test(top.tagName || '')) return top;
     const nearby = $$('img').filter(img => {
       if (img.closest?.('#sl-host') || isChromeImage(img)) return false;
       const r = img.getBoundingClientRect();
@@ -342,7 +356,7 @@
       const db = Math.hypot(rb.left + rb.width / 2 - x, rb.top + rb.height / 2 - y);
       return da - db;
     });
-    return nearby[0] || stack[0] || null;
+    return nearby[0] || top || null;
   }
 
   function pathKey(url) {
@@ -503,6 +517,217 @@
       if (media.poster) out.push(candidate(media.poster, 'video.poster', 'image', { element: media, confidence: '중간' }));
     }
     return { media, candidates: out.filter(Boolean) };
+  }
+
+  // Alt+click is also an inspector entry point. Keep the inspection data
+  // separate from media candidates so a CSS background or a text node does
+  // not get mistaken for an image/video item.
+  function analysisElement(target) {
+    let el = target?.nodeType === 3 ? target.parentElement : target;
+    if (!el?.closest) return null;
+    el = el.closest('*');
+    if (!el || el === state.host || el.closest?.('#sl-host')) return null;
+    if (/^(SCRIPT|STYLE|LINK|META|NOSCRIPT|BR|SOURCE)$/i.test(el.tagName)) el = el.parentElement;
+    return el && el !== document.documentElement ? el : document.body;
+  }
+
+  function elementSelector(el) {
+    if (!el?.tagName) return '';
+    if (el.id) return `#${el.id}`;
+    const parts = [];
+    let cur = el;
+    for (let i = 0; cur && cur !== document.body && parts.length < 4; i += 1, cur = cur.parentElement) {
+      let part = cur.tagName.toLowerCase();
+      const classes = [...(cur.classList || [])].filter(c => /^[a-z][\w-]{0,30}$/i.test(c)).slice(0, 2);
+      if (classes.length) part += `.${classes.join('.')}`;
+      const parent = cur.parentElement;
+      if (parent) {
+        const same = [...parent.children].filter(child => child.tagName === cur.tagName);
+        if (same.length > 1) part += `:nth-of-type(${same.indexOf(cur) + 1})`;
+      }
+      parts.unshift(part);
+    }
+    return parts.join(' > ') || el.tagName.toLowerCase();
+  }
+
+  function parseBackgroundUrls(value) {
+    const urls = [];
+    const re = /url\(\s*["']?([^"')]+?)["']?\s*\)/gi;
+    let match;
+    while ((match = re.exec(String(value || '')))) {
+      const url = abs(match[1]);
+      if (url && !/^data:/i.test(url) && !urls.includes(url)) urls.push(url);
+    }
+    return urls;
+  }
+
+  function hasPaint(value) {
+    const v = String(value || '').trim().toLowerCase();
+    return !!v && v !== 'none' && v !== 'transparent' && !/^rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)$/i.test(v);
+  }
+
+  function analyzeTarget(target) {
+    const el = analysisElement(target);
+    if (!el) return null;
+    let style;
+    try { style = getComputedStyle(el); } catch { return null; }
+    // A click often lands on a transparent overlay inside the actual painted
+    // section. Walk up until the first ancestor that owns a real background so
+    // page-level images/gradients are still inspectable without changing the
+    // text element used for typography analysis.
+    let backgroundEl = el;
+    let backgroundStyle = style;
+    for (let cur = el; cur; cur = cur.parentElement) {
+      let candidateStyle;
+      try { candidateStyle = getComputedStyle(cur); } catch { continue; }
+      const imageValue = candidateStyle.backgroundImage || 'none';
+      if (imageValue !== 'none' || hasPaint(candidateStyle.backgroundColor)) {
+        backgroundEl = cur;
+        backgroundStyle = candidateStyle;
+        break;
+      }
+      if (cur === document.body) break;
+    }
+    const backgroundImage = backgroundStyle.backgroundImage || 'none';
+    const urls = parseBackgroundUrls(backgroundImage);
+    const hasGradient = /gradient\(/i.test(backgroundImage);
+    const hasBackgroundImage = backgroundImage !== 'none';
+    const background = hasBackgroundImage || hasGradient || hasPaint(backgroundStyle.backgroundColor)
+      ? {
+          image: backgroundImage,
+          urls,
+          gradient: hasGradient ? backgroundImage : '',
+          color: backgroundStyle.backgroundColor,
+          position: backgroundStyle.backgroundPosition,
+          size: backgroundStyle.backgroundSize,
+          repeat: backgroundStyle.backgroundRepeat,
+          blend: backgroundStyle.backgroundBlendMode,
+          tag: backgroundEl.tagName.toLowerCase(),
+          selector: elementSelector(backgroundEl)
+        }
+      : null;
+    const rawText = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    const hasDirectText = [...(el.childNodes || [])].some(node => node.nodeType === 3 && node.textContent.trim());
+    const textLike = hasDirectText || /^(A|BUTTON|H[1-6]|P|SPAN|STRONG|EM|LABEL|LI|TD|TH|FIGCAPTION|OPTION)$/i.test(el.tagName);
+    const rect = el.getBoundingClientRect();
+    const text = rawText && textLike && rect.width >= 2 && rect.height >= 2
+      ? {
+          sample: rawText.slice(0, 180),
+          color: style.color,
+          family: style.fontFamily,
+          size: style.fontSize,
+          weight: style.fontWeight,
+          style: style.fontStyle,
+          lineHeight: style.lineHeight,
+          letterSpacing: style.letterSpacing,
+          align: style.textAlign,
+          decoration: [style.textDecorationLine, style.textDecorationStyle].filter(Boolean).join(' '),
+          transform: style.textTransform,
+          shadow: style.textShadow
+        }
+      : null;
+    if (!background && !text) return null;
+    const cssText = [
+      background && `background-image: ${background.image};`,
+      background && `background-color: ${background.color};`,
+      background && `background-position: ${background.position};`,
+      background && `background-size: ${background.size};`,
+      text && `font-family: ${text.family};`,
+      text && `font-size: ${text.size};`,
+      text && `font-weight: ${text.weight};`,
+      text && `color: ${text.color};`,
+      text && `line-height: ${text.lineHeight};`,
+      text && `letter-spacing: ${text.letterSpacing};`
+    ].filter(Boolean).join('\n');
+    return {
+      kind: 'style',
+      selector: elementSelector(el),
+      tag: el.tagName.toLowerCase(),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      background,
+      text,
+      cssText
+    };
+  }
+
+  function plainAnalysis(analysis) {
+    if (!analysis) return null;
+    const { element, ...plain } = analysis;
+    return plain;
+  }
+
+  function analysisRows(analysis) {
+    const rows = [];
+    const add = (label, value) => { if (value && value !== 'none' && value !== 'normal') rows.push([label, value]); };
+    add('영역', analysis.width && analysis.height ? `${analysis.width} × ${analysis.height}px` : '');
+    if (analysis.background) {
+      add('배경 색상', analysis.background.color);
+      add('배경 이미지', analysis.background.urls.join('\n'));
+      add('그라디언트', analysis.background.gradient);
+      add('위치 / 크기', `${analysis.background.position} / ${analysis.background.size}`);
+      add('반복', analysis.background.repeat);
+      add('블렌드', analysis.background.blend);
+    }
+    if (analysis.text) {
+      add('서체', analysis.text.family);
+      add('글자 크기', analysis.text.size);
+      add('굵기', analysis.text.weight);
+      add('글자 색상', analysis.text.color);
+      add('행간', analysis.text.lineHeight);
+      add('자간', analysis.text.letterSpacing);
+      add('정렬', analysis.text.align);
+      add('스타일', [analysis.text.style, analysis.text.transform, analysis.text.decoration].filter(Boolean).join(' · '));
+      add('그림자', analysis.text.shadow);
+    }
+    return rows;
+  }
+
+  function renderStyleAnalysis(analysis) {
+    const card = document.createElement('article');
+    card.className = 'sl-inspector-card';
+    const title = analysis.background && analysis.text ? '요소 스타일 분석' : analysis.background ? 'CSS 배경 분석' : '텍스트 스타일 분석';
+    const kicker = analysis.background && analysis.text ? 'BACKGROUND · TYPOGRAPHY' : analysis.background ? 'CSS BACKGROUND' : 'TEXT CSS';
+    card.innerHTML = `<div class="sl-kicker">${esc(kicker)}</div><strong>${esc(title)}</strong>`;
+    if (analysis.background) {
+      const swatch = document.createElement('div');
+      swatch.className = 'sl-style-swatch';
+      swatch.style.backgroundColor = analysis.background.color || 'transparent';
+      if (analysis.background.image && analysis.background.image !== 'none') swatch.style.backgroundImage = analysis.background.image;
+      card.append(swatch);
+    }
+    if (analysis.text) {
+      const sample = document.createElement('div');
+      sample.className = 'sl-text-sample';
+      sample.textContent = analysis.text.sample;
+      sample.style.color = analysis.text.color;
+      sample.style.fontFamily = analysis.text.family;
+      sample.style.fontSize = analysis.text.size;
+      sample.style.fontWeight = analysis.text.weight;
+      sample.style.fontStyle = analysis.text.style;
+      sample.style.lineHeight = analysis.text.lineHeight;
+      sample.style.letterSpacing = analysis.text.letterSpacing;
+      card.append(sample);
+    }
+    const rows = document.createElement('dl');
+    rows.className = 'sl-inspector-rows';
+    analysisRows(analysis).forEach(([label, value]) => {
+      const dt = document.createElement('dt');
+      dt.textContent = label;
+      const dd = document.createElement('dd');
+      dd.textContent = value;
+      rows.append(dt, dd);
+    });
+    card.append(rows);
+    const actions = document.createElement('div');
+    actions.className = 'sl-inspector-actions';
+    actions.append(actionButton('primary', 'CSS 복사', () => copy(analysis.cssText), 'code'));
+    analysis.background?.urls?.slice(0, 3).forEach((url, index) => {
+      actions.append(actionButton('normal', `배경 URL ${index + 1} 복사`, () => copy(url), 'copy'));
+      actions.append(actionButton('normal', `배경 URL ${index + 1} 보기`, () => window.open(url, '_blank', 'noopener'), 'open'));
+    });
+    card.append(actions);
+    return card;
   }
 
   document.documentElement.addEventListener('sl-platform-media', event => {
@@ -729,6 +954,8 @@
       state: item.state || '',
       temporary: !!item.temporary,
       stream: !!item.stream,
+      audioOnly: !!item.audioOnly,
+      poster: item.poster || item.thumbnail || '',
       signed: (item.flags || []).includes('signed'),
       code: code.length < 120000 ? code : ''
     };
@@ -741,6 +968,7 @@
       .map(plainItem).filter(Boolean);
     let videos = [];
     try { videos = refreshVideoItems().map(VF.plain); } catch { videos = []; }
+    videos = dedupe([...videos, ...all.filter(i => i.type === 'video')]);
     return {
       images: all.filter(i => i.type === 'image'),
       videos,
@@ -805,6 +1033,7 @@
     state.shadow?.querySelectorAll?.('#sl-root, .sl-lightbox, .sl-slice-editor')?.forEach(n => n.remove());
     state.panel = null;
     state.lightboxItem = null;
+    state.analysis = null;
     state.selected?.classList?.remove('sl-select');
   }
 
@@ -847,13 +1076,47 @@
         element: video, confidence: '높음', width: video?.videoWidth || 0, height: video?.videoHeight || 0, relation: 'page'
       });
     }).filter(Boolean);
+    const audios = deepAll('audio').map(audio => {
+      if (audio.closest?.('#sl-host')) return null;
+      const r = audio.getBoundingClientRect();
+      const url = abs(audio.currentSrc || audio.src);
+      if (!url && Math.min(r.width || 0, r.height || 0) < 1) return null;
+      return candidate(url || 'blob:session-audio', '페이지 오디오', 'video', {
+        element: audio, confidence: '중간', relation: 'page', audioOnly: true
+      });
+    }).filter(Boolean);
+    const audioSources = deepAll('audio source[src]').map(source => {
+      const url = abs(source.src);
+      if (!url) return null;
+      return candidate(url, 'audio.source', 'video', {
+        element: source.closest('audio'), confidence: '높음', relation: 'page', audioOnly: true
+      });
+    }).filter(Boolean);
     const posters = deepAll('video[poster]').map(video => candidate(video.getAttribute('poster'), '영상 포스터', 'image', {
       confidence: '중간', relation: 'page'
     })).filter(Boolean);
     const svgs = collectPageSvgs();
+    const canvases = deepAll('canvas').map(canvas => {
+      if (canvas.closest?.('#sl-host')) return null;
+      const width = canvas.width || canvas.clientWidth || 0;
+      const height = canvas.height || canvas.clientHeight || 0;
+      if (width < 96 || height < 96) return null;
+      const size = `${width}x${height}`;
+      let cached = canvasCache.get(canvas);
+      let url = cached?.url;
+      try {
+        if (!url || cached?.size !== size) {
+          url = canvas.toDataURL('image/png');
+          canvasCache.set(canvas, { url, size });
+        }
+      } catch { return null; }
+      return candidate(url, '캔버스 스냅샷', 'image', {
+        element: canvas, confidence: '중간', relation: 'page', width, height, allowJunk: true
+      });
+    }).filter(Boolean);
     let backgrounds = [];
     try { backgrounds = collectBackgrounds(); } catch { /* ignore */ }
-    return [...images, ...videos, ...sources, ...posters, ...svgs, ...collectCatalogMedia(), ...backgrounds, ...collectSiteExtras()];
+    return [...images, ...videos, ...sources, ...audios, ...audioSources, ...posters, ...canvases, ...svgs, ...collectCatalogMedia(), ...backgrounds, ...collectSiteExtras()];
   }
 
   function collectSiteExtras() {
@@ -988,7 +1251,14 @@
   }
 
   function mergePageMedia() {
-    const incoming = collectPageMedia();
+    // Keep the collection tabs live: lazy images/SVGs, newly mounted videos,
+    // and platform/commerce media all enter the same page-level pool.
+    const incoming = [
+      ...collectPageMedia(),
+      ...(state.platformMedia || []),
+      ...collectSiteExtras(),
+      ...(isCommerce() ? collectCommerce() : [])
+    ];
     const have = new Set(state.candidates.map(itemKey));
     let added = 0;
     incoming.forEach(item => {
@@ -1039,6 +1309,42 @@
     }, 2000);
   }
 
+  function videoPoster(item) {
+    const urls = [];
+    let frame = '';
+    const add = value => {
+      const url = abs(value || '');
+      if (url && !urls.includes(url) && (!/^data:/i.test(url) || /^data:image\//i.test(url))) urls.push(url);
+    };
+    add(item?.poster);
+    add(item?.thumbnail);
+    const el = item?.element?.tagName === 'VIDEO' ? item.element : (item?.vid && VF?.videoByVid?.(item.vid));
+    add(el?.poster);
+    add(el?.getAttribute?.('poster'));
+    add(el?.dataset?.poster);
+    add(el?.dataset?.thumbnail);
+    const root = el?.closest?.('article,[role="article"],ytd-watch-flexy,ytd-player') || state.selected?.closest?.('article,[role="article"],ytd-watch-flexy,ytd-player');
+    root?.querySelectorAll?.('img[src],img[srcset],meta[property="og:image"],meta[name="twitter:image"]')?.forEach(node => {
+      add(node.currentSrc || node.src || node.content || node.getAttribute?.('content'));
+    });
+    document.querySelectorAll?.('meta[property="og:image"],meta[name="twitter:image"]')?.forEach(node => add(node.content));
+    const href = item?.pageUrl || item?.postUrl || state.postUrl || location.href;
+    const id = SL.youtubeIdFromUrl?.(href);
+    if (id) SL.youtubeThumbs?.(id)?.forEach(row => add(row.url));
+    const known = urls.find(url => SL.isImageUrl(url) || /\.(?:jpe?g|png|webp)(?:$|[?#])/i.test(url));
+    if (known) return known;
+    if (el && el.readyState >= 2 && el.videoWidth > 0 && el.videoHeight > 0) {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.min(el.videoWidth, 720);
+        canvas.height = Math.max(1, Math.round(canvas.width * el.videoHeight / el.videoWidth));
+        canvas.getContext('2d')?.drawImage(el, 0, 0, canvas.width, canvas.height);
+        frame = canvas.toDataURL('image/jpeg', .78);
+      } catch { /* cross-origin media cannot be rasterized; keep the honest blank state */ }
+    }
+    return frame || urls[0] || '';
+  }
+
   function mediaNode(item, className) {
     if (item.type === 'svg' || /\.svg(?:$|[?#])/i.test(item.url || '') || /^data:image\/svg/i.test(item.url || '')) {
       const holder = document.createElement('div');
@@ -1056,9 +1362,15 @@
     if (!item.url || (/^data:/i.test(item.url) && item.type !== 'svg')) return null;
     const urlLooksImage = SL.isImageUrl(item.url) || SL.PHOTO_EXT.test(item.url) || /^image\//i.test(item.mime || '');
     if (item.type === 'video' && !urlLooksImage) {
-      const poster = state.selectedMedia?.poster
-        || state.selected?.closest?.('article')?.querySelector?.('img')?.currentSrc
-        || '';
+      const poster = videoPoster(item) || state.selectedMedia?.poster || '';
+      if (item.audioOnly) {
+        const node = document.createElement('audio');
+        node.className = className || '';
+        node.controls = true;
+        node.preload = 'metadata';
+        if (item.url) node.src = item.url;
+        return node;
+      }
       const node = document.createElement('video');
       node.className = className || '';
       node.controls = true;
@@ -1088,13 +1400,59 @@
     return node;
   }
 
-  function actionButton(kind, label, onClick) {
+  const UI_ICONS = {
+    link: '<path d="M11 21a6 6 0 0 1 0-12h4v4h-4a2 2 0 1 0 0 4h4l-4 4Zm10-10a6 6 0 0 1 0 12h-4v-4h4a2 2 0 1 0 0-4h-4l4-4Z"/><path d="M11 14h10v4H11z"/>',
+    copy: '<path d="M9 8h13a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3V11a3 3 0 0 1 3-3Z"/><path d="M5 21H4a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3h13a3 3 0 0 1 3 3v1h-4V6H5v15Z"/>',
+    open: '<path d="M15 4h13v13h-4V11l-11 11-3-3 11-11h-6V4Z"/><path d="M5 5h8v4H9v14h14v-4h4v8H5V5Z"/>',
+    save: '<path d="M6 3h17l5 5v21H6V3Z"/><path d="M10 4v9h11V4h-4v5h-4V4h-3Z" fill="#1c1c1c"/><path d="M11 18h10v8H11v-8Z" fill="#1c1c1c"/>',
+    image: '<path d="M5 4h22a3 3 0 0 1 3 3v18a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z"/><circle cx="10" cy="11" r="3" fill="#1c1c1c"/><path d="m4 25 8-8 5 5 4-4 6 7H4Z" fill="#1c1c1c"/>',
+    video: '<path d="M4 6h16a3 3 0 0 1 3 3v2l6-4v18l-6-4v2a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3Z"/><path d="m12 11 7 5-7 5v-10Z" fill="#1c1c1c"/>',
+    code: '<path d="m12 5 3 3-6 6 6 6-3 3-9-9 9-9Zm8 0 9 9-9 9-3-3 6-6-6-6 3-3Z"/>',
+    slice: '<path d="M4 6h24v4H4V6Zm0 9h24v4H4v-4Zm0 9h24v4H4v-4ZM9 3h4v26H9V3Zm10 0h4v26h-4V3Z"/>',
+    list: '<path d="M5 5h5v5H5V5Zm0 9h5v5H5v-5Zm0 9h5v5H5v-5Zm8-18h14v5H13V5Zm0 9h14v5H13v-5Zm0 9h14v5H13v-5Z"/>',
+    terminal: '<path d="M4 4h24a3 3 0 0 1 3 3v18a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z"/><path d="m8 11 5 5-5 5-3-3 2-2-2-2 3-3Zm8 8h8v4h-8v-4Z" fill="#1c1c1c"/>',
+    zip: '<path d="M6 3h22v26H6V3Zm5 4v4h4V7h-4Zm4 4v4h4v-4h-4Zm-4 6v4h8v-4h-8Zm0 7h8v4h-8v-4Z"/>',
+    methods: '<path d="M16 2a14 14 0 1 0 0 28 14 14 0 0 0 0-28Zm2 7v6l5 3-2 3-7-4V9h4Z"/>',
+    close: '<path d="m8 4 8 8 8-8 4 4-8 8 8 8-4 4-8-8-8 8-4-4 8-8-8-8 4-4Z"/>',
+    dock: '<path d="M4 5h24v22H4V5Zm4 4v14h12V9H8Zm15 0v14h1V9h-1Z"/>',
+    chevron: '<path d="m5 10 11 11 11-11 3 3-14 14L2 13l3-3Z"/>',
+    prev: '<path d="m21 4 4 4-8 8 8 8-4 4L9 16 21 4Z"/>',
+    next: '<path d="m11 4 12 12-12 12-4-4 8-8-8-8 4-4Z"/>',
+    plus: '<path d="M14 2h4v12h12v4H18v12h-4V18H2v-4h12V2Z"/>',
+    minus: '<path d="M2 14h28v4H2v-4Z"/>',
+    trash: '<path d="M5 8h22v4H5V8Zm5-5h12l2 5H8l2-5Zm-2 9h16l-1 17H9L8 12Zm5 4v10h3V16h-3Zm6 0v10h3V16h-3Z"/>'
+  };
+
+  function iconSvg(name) {
+    return `<svg class="sl-btn-icon sl-icon-filled" viewBox="0 0 32 32" aria-hidden="true">${UI_ICONS[name] || UI_ICONS.link}</svg>`;
+  }
+
+  function setButtonText(button, text) {
+    if (!button) return;
+    const label = button.querySelector?.('.sl-btn-label');
+    if (label) label.textContent = text;
+    else button.textContent = text;
+  }
+
+  function actionButton(kind, label, onClick, icon = 'link') {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = kind === 'primary' ? 'sl-btn sl-btn-brand' : 'sl-btn';
-    btn.textContent = label;
+    btn.innerHTML = `${iconSvg(icon)}<span class="sl-btn-label">${esc(label)}</span>`;
     btn.onclick = onClick;
     return btn;
+  }
+
+  function actionGroup(title, icon, open = true) {
+    const group = document.createElement('details');
+    group.className = 'sl-action-group';
+    group.open = open;
+    const summary = document.createElement('summary');
+    summary.innerHTML = `${iconSvg(icon)}<span>${esc(title)}</span><span class="sl-group-chevron">${iconSvg('chevron')}</span>`;
+    const body = document.createElement('div');
+    body.className = 'sl-action-group-body';
+    group.append(summary, body);
+    return { group, body };
   }
 
   function liveUrl(item) {
@@ -1108,36 +1466,41 @@
   }
 
   function fillItemActions(actions, item, extra = {}) {
-    actions.append(actionButton('primary', 'URL 복사', ev => copy(liveUrl(item), ev.currentTarget)));
-    actions.append(actionButton('primary', '저장', () => saveItem(item)));
-    if (extra.onUrl) actions.append(actionButton('normal', extra.urlLabel || 'URL 보기', extra.onUrl));
-    actions.append(actionButton('normal', '새 탭', () => window.open(liveUrl(item), '_blank', 'noopener')));
-    if (item.type === 'svg') {
-      actions.append(actionButton('primary', '코드 복사', ev => copySvg(item, ev.currentTarget)));
-      if (extra.onCodeView) actions.append(actionButton('normal', '코드 보기', extra.onCodeView));
-    }
+    actions.classList.add('sl-action-groups');
+    const source = actionGroup('원본 주소', 'link', true);
+    const save = actionGroup('저장·변환', item.type === 'video' ? 'video' : 'save', true);
+    const advanced = actionGroup('도구 더보기', 'methods', false);
+    actions.append(source.group, save.group, advanced.group);
+    source.body.append(actionButton('primary', 'URL 복사', ev => copy(liveUrl(item), ev.currentTarget), 'copy'));
+    if (extra.onUrl) source.body.append(actionButton('normal', extra.urlLabel || 'URL 보기', extra.onUrl, 'link'));
+    source.body.append(actionButton('normal', '새 탭에서 열기', () => window.open(liveUrl(item), '_blank', 'noopener'), 'open'));
     if (item.type === 'image' || item.type === 'svg') {
+      save.body.append(actionButton('primary', '원본 저장', () => saveItem(item), 'save'));
       [['JPG', 'jpg', 'image/jpeg'], ['PNG', 'png', 'image/png'], ['WebP', 'webp', 'image/webp']].forEach(([label, ext, mime]) => {
-        actions.append(actionButton('normal', `${label} 저장`, ev => convertImage(item, { label, ext, mime }, ev.currentTarget)));
+        save.body.append(actionButton('normal', `${label} 저장`, ev => convertImage(item, { label, ext, mime }, ev.currentTarget), 'image'));
       });
-      actions.append(actionButton('normal', '분할 편집', () => { extra.onSlice?.(); openSliceEditor(item); }));
+      advanced.body.append(actionButton('normal', '분할 편집', () => { extra.onSlice?.(); openSliceEditor(item); }, 'slice'));
+    }
+    if (item.type === 'svg') {
+      advanced.body.append(actionButton('primary', '코드 복사', ev => copySvg(item, ev.currentTarget), 'code'));
+      if (extra.onCodeView) advanced.body.append(actionButton('normal', '코드 보기', extra.onCodeView, 'code'));
     }
     if (item.type === 'video') {
       const video = item.element?.tagName === 'VIDEO' ? item.element : state.selectedMedia;
       const best = VF ? VF.best(refreshVideoItems(), video || null) : null;
       if (best) {
         const label = state.recorder ? '녹화 멈추고 저장' : best.kind === 'drm' ? 'DRM 보호 (저장 불가)' : `영상 저장 · ${best.badge}${best.quality ? ` ${best.quality}` : ''}`;
-        const btn = actionButton('primary', label, ev => (state.recorder ? stopRecording(true) : saveVideo(best, ev.currentTarget)));
+        const btn = actionButton('primary', label, ev => (state.recorder ? stopRecording(true) : saveVideo(best, ev.currentTarget)), best.kind === 'drm' ? 'methods' : 'video');
         btn.title = best.note || '';
         if (best.kind === 'drm') btn.disabled = true;
-        actions.prepend(btn);
+        save.body.prepend(btn);
         const note = document.createElement('p');
         note.className = 'sl-vnote';
         note.textContent = best.note || '';
-        actions.after(note);
+        save.body.append(note);
       }
-      actions.append(actionButton('normal', '영상 저장 방법 모두 보기', () => state.switchTab?.('video')));
-      actions.append(actionButton('normal', 'yt-dlp 복사', ev => copy(ytdlpCommand(), ev.currentTarget)));
+      advanced.body.append(actionButton('normal', '영상 저장 방법 모두 보기', () => state.switchTab?.('video'), 'methods'));
+      advanced.body.append(actionButton('normal', 'yt-dlp 명령 복사', ev => copy(ytdlpCommand(), ev.currentTarget), 'terminal'));
     }
   }
 
@@ -1168,7 +1531,7 @@
   }
 
   async function oneClickSaveVideo(item, button) {
-    const setLabel = text => { if (button) button.textContent = text; };
+    const setLabel = text => setButtonText(button, text);
     if (item && !item.kind && (item.type === 'image' || item.type === 'svg' || SL.isImageUrl(item.url) || SL.PHOTO_EXT.test(item.url || ''))) {
       saveItem(item);
       setLabel('이미지 저장');
@@ -1197,7 +1560,7 @@
 
   /** Saves one video item using the right method for its kind. */
   async function saveVideo(item, button) {
-    const setLabel = text => { if (button) button.textContent = text; };
+    const setLabel = text => setButtonText(button, text);
     if (item.kind === 'drm') {
       toast(item.note || 'DRM 보호 영상이라 저장할 수 없습니다.', 'error');
       return { ok: false, mode: 'drm', error: item.note || 'DRM 보호 영상이라 저장할 수 없습니다.' };
@@ -1207,7 +1570,7 @@
       const res = await VF.downloadDirect(item);
       if (res?.ok) {
         toast(`원본 영상 저장을 시작했습니다 · ${item.file || ''}`);
-        setLabel('저장됨 ✓');
+        setLabel('저장됨');
         return { ok: true, mode: 'file', file: item.file };
       }
       // The file URL was refused (expired / blocked): try the next-best method for the same video.
@@ -1266,7 +1629,7 @@
   }
 
   async function startRecording(video, button) {
-    const setLabel = text => { if (button) button.textContent = text; };
+    const setLabel = text => setButtonText(button, text);
     if (!video || !(video.videoWidth || video.readyState)) {
       captureHud('재생할 영상을 먼저 열어 주세요');
       setTimeout(() => captureHud(''), 2200);
@@ -1347,7 +1710,7 @@
       captureHud(`저장 중… (${(blob.size / 1048576).toFixed(1)}MB)`);
       const finish = ok => {
         captureHud(ok ? `녹화 영상을 저장했습니다 · ${name}` : '저장하지 못했습니다');
-        setLabel(ok ? '저장됨 ✓' : '실패');
+        setLabel(ok ? '저장됨' : '실패');
         setTimeout(() => captureHud(''), 3200);
       };
       if (blob.size <= 24 * 1048576) downloadBlob(blob, name, ok => finish(ok !== false));
@@ -1384,13 +1747,24 @@
   function videoRow(item) {
     const row = document.createElement('article');
     row.className = `sl-vrow is-${item.kind}${item.playing ? ' is-playing' : ''}`;
+    const poster = videoPoster(item);
+    if (poster) {
+      const thumb = document.createElement('img');
+      thumb.className = 'sl-video-thumb';
+      thumb.src = poster;
+      thumb.alt = item.title || item.source || '영상 썸네일';
+      thumb.loading = 'lazy';
+      thumb.referrerPolicy = 'no-referrer-when-downgrade';
+      thumb.onerror = () => { thumb.remove(); };
+      row.append(thumb);
+    }
     const head = document.createElement('div');
     head.className = 'sl-vhead';
     const badge = document.createElement('span');
     badge.className = `sl-vbadge k-${item.kind}`;
     badge.textContent = item.badge || item.kind;
     head.append(badge);
-    const facts = [item.quality, item.codec, item.audio === true ? '소리 포함' : item.audio === false ? '소리 없음' : '', item.duration ? fmtClock(item.duration) : '', item.playing ? '지금 보는 영상' : ''].filter(Boolean);
+    const facts = [item.audioOnly ? '오디오' : item.quality, item.codec, item.audio === true ? '소리 포함' : item.audio === false ? '소리 없음' : '', item.duration ? fmtClock(item.duration) : '', item.playing ? '지금 보는 영상' : ''].filter(Boolean);
     const strong = document.createElement('strong');
     strong.textContent = facts.join(' · ') || item.source || '';
     head.append(strong);
@@ -1511,7 +1885,7 @@
       code: item.type === 'svg' ? (item.code || '') : '',
       name: `${String(i + 1).padStart(2, '0')}-${downloadName(item)}`
     }));
-    if (button) { button.disabled = true; button.textContent = 'ZIP 만드는 중…'; }
+    if (button) { button.disabled = true; setButtonText(button, 'ZIP 만드는 중…'); }
     chrome.runtime.sendMessage({
       type: 'zipDownload',
       items: payload,
@@ -1520,17 +1894,46 @@
       if (result?.ok) {
         if (button) {
           button.disabled = false;
-          button.textContent = `ZIP ${result.count || payload.length}개`;
-          setTimeout(() => { button.textContent = 'ZIP 저장'; }, 1800);
+          setButtonText(button, `ZIP ${result.count || payload.length}개`);
+          setTimeout(() => { setButtonText(button, 'ZIP 저장'); }, 1800);
         }
         return;
       }
-      if (button) button.textContent = 'ZIP 불가 · 개별 저장';
+      if (button) setButtonText(button, 'ZIP 불가 · 개별 저장');
       payload.forEach((item, i) => {
         const src = items[i];
         if (src) setTimeout(() => saveItem(src), i * 320);
       });
-      if (button) setTimeout(() => { button.disabled = false; button.textContent = 'ZIP 저장'; }, 2400);
+      if (button) setTimeout(() => { button.disabled = false; setButtonText(button, 'ZIP 저장'); }, 2400);
+    });
+  }
+
+  function csvCell(value) {
+    return `"${String(value ?? '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
+  }
+
+  function exportMetadata(items, button) {
+    const rows = [['번호', '종류', '파일명', '원본 URL', '가로', '세로', '포맷', '용량', '상태', '출처']];
+    items.forEach((item, index) => {
+      rows.push([
+        index + 1,
+        item.type || (item.kind ? 'video' : ''),
+        downloadName(item),
+        liveUrl(item),
+        item.width || '',
+        item.height || '',
+        item.mime || item.ext || item.type || '',
+        item.size ? `${Math.round(item.size / 1024)} KB` : '',
+        item.state || item.note || '',
+        item.source || ''
+      ]);
+    });
+    const csv = '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n');
+    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `${location.hostname.replace(/^www\./, '')}-metadata.csv`, () => {
+      if (button) {
+        setButtonText(button, `CSV ${items.length}개`);
+        setTimeout(() => setButtonText(button, '메타 CSV'), 1800);
+      }
     });
   }
 
@@ -1574,9 +1977,9 @@
   function copy(value, button) {
     const done = () => {
       if (!button) { toast(String(value).includes('\n') ? `${String(value).split('\n').length}개 URL을 복사했습니다` : '복사했습니다'); return; }
-      const prev = button.textContent;
-      button.textContent = '복사됨';
-      setTimeout(() => { button.textContent = prev; }, 1200);
+      const prev = button.querySelector?.('.sl-btn-label')?.textContent || button.textContent;
+      setButtonText(button, '복사됨');
+      setTimeout(() => { setButtonText(button, prev); }, 1200);
     };
     navigator.clipboard?.writeText(value).then(done).catch(() => {
       const area = document.createElement('textarea');
@@ -1674,12 +2077,12 @@
 
   function convertImage(item, format, button) {
     const prev = button?.textContent;
-    if (button) button.textContent = '변환 중…';
+    if (button) setButtonText(button, '변환 중…');
     const name = `${(fileName(item.url) || 'image').replace(/\.[^.]+$/, '')}.${format.ext}`;
     const done = (ok, err) => {
-      if (button) button.textContent = ok ? '저장됨' : '변환 실패';
+      if (button) setButtonText(button, ok ? '저장됨' : '변환 실패');
       if (!ok) console.warn("[Let's Pick] convert", err);
-      setTimeout(() => { if (button) button.textContent = prev; }, 1800);
+      setTimeout(() => { if (button) setButtonText(button, prev); }, 1800);
     };
     if (item.type === 'svg' && item.code) {
       const image = new Image();
@@ -1721,18 +2124,18 @@
     card.className = 'sl-lightbox-card';
     const close = document.createElement('button');
     close.className = 'sl-lightbox-close';
-    close.textContent = '×';
+    close.innerHTML = iconSvg('close');
     close.onclick = () => { layer.remove(); state.lightboxItem = null; };
     close.title = '닫기 (Esc)';
     state.lightboxItem = item;
     const prev = document.createElement('button');
     prev.className = 'sl-lightbox-nav sl-lightbox-prev';
-    prev.textContent = '‹';
+    prev.innerHTML = iconSvg('prev');
     const next = document.createElement('button');
     next.className = 'sl-lightbox-nav sl-lightbox-next';
-    next.textContent = '›';
-    prev.title = '이전 (←)';
-    next.title = '다음 (→)';
+    next.innerHTML = iconSvg('next');
+    prev.title = '이전 항목';
+    next.title = '다음 항목';
     if (items.length < 2) { prev.hidden = true; next.hidden = true; }
     prev.onclick = () => { layer.remove(); openLightbox(items[(index - 1 + items.length) % items.length], items, (index - 1 + items.length) % items.length); };
     next.onclick = () => { layer.remove(); openLightbox(items[(index + 1) % items.length], items, (index + 1) % items.length); };
@@ -1744,7 +2147,7 @@
     title.textContent = `${labelOf(item)} · ${item.state || ''}`;
     const page = document.createElement('div');
     page.className = 'sl-lightbox-page';
-    page.textContent = `${index + 1} / ${items.length} · ← → 로 넘기기`;
+    page.textContent = `${index + 1} / ${items.length} · 좌우 방향키로 넘기기`;
     const actions = document.createElement('div');
     actions.className = 'sl-lightbox-actions';
     fillItemActions(actions, item, { onSlice: () => layer.remove() });
@@ -1793,6 +2196,12 @@
         </div></header>
         <div class="sl-slice-viewport"><div class="sl-slice-stage"><img class="sl-slice-image" alt=""><div class="sl-slice-lines"></div></div></div>
         <footer class="sl-slice-footer"><span class="sl-slice-count"></span><span>${image.naturalWidth}×${image.naturalHeight}px</span></footer></div>`;
+      layer.querySelector('.sl-slice-close').innerHTML = iconSvg('close');
+      layer.querySelector('.sl-slice-add').innerHTML = `${iconSvg('plus')}<span>가로선</span>`;
+      layer.querySelector('.sl-zoom-out').innerHTML = iconSvg('minus');
+      layer.querySelector('.sl-zoom-in').innerHTML = iconSvg('plus');
+      layer.querySelector('.sl-zoom-out').setAttribute('aria-label', '축소');
+      layer.querySelector('.sl-zoom-in').setAttribute('aria-label', '확대');
       const viewport = layer.querySelector('.sl-slice-viewport');
       const preview = layer.querySelector('.sl-slice-image');
       const linesEl = layer.querySelector('.sl-slice-lines');
@@ -1822,7 +2231,7 @@
           const del = document.createElement('button');
           del.type = 'button';
           del.className = 'sl-slice-line-x';
-          del.textContent = '×';
+          del.innerHTML = iconSvg('close');
           del.title = '이 선 삭제';
           del.onclick = ev => {
             ev.stopPropagation();
@@ -1918,7 +2327,7 @@
           const output = await new Promise((resolve, reject) => canvas.toBlob(b => b ? resolve(b) : reject(), chosen.mime, 0.92));
           downloadBlob(output, `${base}-slice-${String(i + 1).padStart(2, '0')}.${chosen.ext}`);
         }
-        button.textContent = '저장 완료';
+        setButtonText(button, '저장 완료');
         button.disabled = false;
       };
       uiRoot().append(layer);
@@ -1943,7 +2352,7 @@
     }
     if (tab === 'video') {
       const q = state.query.trim().toLowerCase();
-      const list = state.videoItems || [];
+      const list = dedupe([...(state.videoItems || []), ...state.candidates.filter(item => item.type === 'video')]);
       return q ? list.filter(i => `${i.note} ${i.source} ${i.quality} ${i.badge} ${i.url || ''}`.toLowerCase().includes(q)) : list;
     }
     let list = state.candidates.filter(item => item.type === tab);
@@ -1970,7 +2379,12 @@
   }
 
   function render() {
+    // Rebuilding the panel is part of every inspection. Preserve the current
+    // analysis payload while tearing down the previous DOM; otherwise
+    // closePanel() would erase it before drawSelected() can render the CSS card.
+    const analysis = state.analysis;
     closePanel();
+    state.analysis = analysis;
     refreshVideoItems();
     const shadow = uiRoot();
     const root = document.createElement('div');
@@ -1990,14 +2404,14 @@
         <h2>Let's Pick <small class="sl-ver">${esc(VERSION)}</small></h2>
         <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         <span class="sl-spacer"></span>
-        <button class="sl-icon-btn sl-dock" type="button" title="패널을 반대쪽으로 옮기기">⇆</button>
-        <button class="sl-icon-btn sl-close" type="button" title="닫기 (Esc)" aria-label="닫기">×</button>
+        <button class="sl-icon-btn sl-dock" type="button" title="패널을 반대쪽으로 옮기기" aria-label="패널 위치 바꾸기">${iconSvg('dock')}</button>
+        <button class="sl-icon-btn sl-close" type="button" title="닫기 (Esc)" aria-label="닫기">${iconSvg('close')}</button>
       </header>
       <nav class="sl-tabs" role="tablist">
-        <button data-tab="selected" title="단축키 1">선택</button>
-        <button data-tab="image" title="단축키 2">이미지 <b>0</b></button>
-        <button data-tab="video" title="단축키 3">영상 <b>0</b></button>
-        <button data-tab="svg" title="단축키 4">SVG <b>0</b></button>
+        <button data-tab="selected" title="단축키 1">${iconSvg('list')}<span class="sl-tab-label">선택</span></button>
+        <button data-tab="image" title="단축키 2">${iconSvg('image')}<span class="sl-tab-label">이미지</span> <b>0</b></button>
+        <button data-tab="video" title="단축키 3">${iconSvg('video')}<span class="sl-tab-label">영상</span> <b>0</b></button>
+        <button data-tab="svg" title="단축키 4">${iconSvg('code')}<span class="sl-tab-label">SVG</span> <b>0</b></button>
       </nav>
       <div class="sl-tools"></div>
       <main class="sl-main"></main>
@@ -2016,14 +2430,15 @@
     const updateCounts = () => {
       panel.querySelector('[data-tab="image"] b').textContent = state.candidates.filter(i => i.type === 'image').length;
       const videoBtn = panel.querySelector('[data-tab="video"]');
-      videoBtn.innerHTML = `영상 <b>${(state.videoItems || []).filter(i => i.kind !== 'drm').length}</b>`;
+      const videoCount = videoBtn.querySelector('b');
+      if (videoCount) videoCount.textContent = dedupe([...(state.videoItems || []), ...state.candidates.filter(item => item.type === 'video')]).filter(i => i.kind !== 'drm').length;
       panel.querySelector('[data-tab="svg"] b').textContent = state.candidates.filter(i => i.type === 'svg').length;
     };
 
     const updateBulk = () => {
       const list = visibleList();
       const chosen = list.filter(item => state.selectedKeys.has(itemKey(item))).length;
-      const set = (sel, text) => { const el = tools.querySelector(sel); if (el && !el.disabled) el.textContent = text; };
+      const set = (sel, text) => { const el = tools.querySelector(sel); if (el && !el.disabled) setButtonText(el, text); };
       const n = chosen || list.length;
       set('.sl-act-save', `저장 (${n})`);
       set('.sl-act-zip', `ZIP (${Math.min(n, ZIP_MAX)})`);
@@ -2034,7 +2449,9 @@
         all.indeterminate = chosen > 0 && chosen < list.length;
       }
       const note = tools.querySelector('.sl-select-note');
-      if (note) note.textContent = chosen ? `${chosen}개 선택됨 — 아래 버튼은 선택한 것만 처리` : `${list.length}개 · 체크해서 고르면 선택한 것만 처리`;
+      if (note) note.textContent = chosen
+        ? `${chosen}개 선택됨 — 아래 버튼은 선택한 것만 처리`
+        : `${list.length}개 · 페이지 전체 자동 수집 · 스크롤하면 계속 추가`;
       tools.querySelectorAll('.sl-bulk .sl-btn').forEach(btn => { if (!btn.dataset.busy) btn.disabled = !list.length; });
     };
 
@@ -2067,16 +2484,16 @@
       tile.insertAdjacentHTML('beforeend', `<strong title="${esc(labelOf(item))}">${esc(labelOf(item))}</strong><small>${esc(item.source)}</small><small class="sl-meta">${esc(item.state)}</small>`);
       const quick = document.createElement('div');
       quick.className = 'sl-quick';
-      const qb = (label, title, fn) => {
+      const qb = (label, title, fn, icon) => {
         const b = document.createElement('button');
         b.type = 'button';
-        b.textContent = label;
+        b.innerHTML = `${iconSvg(icon)}<span class="sl-btn-label">${esc(label)}</span>`;
         b.title = title;
         b.onclick = ev => { ev.stopPropagation(); fn(ev.currentTarget); };
         quick.append(b);
       };
-      qb('저장', '이 파일 저장', () => saveItem(item));
-      qb('복사', 'URL 복사', btn => (item.type === 'svg' ? copySvg(item, btn) : copy(liveUrl(item), btn)));
+      qb('저장', '이 파일 저장', () => saveItem(item), 'save');
+      qb('복사', 'URL 복사', btn => (item.type === 'svg' ? copySvg(item, btn) : copy(liveUrl(item), btn)), 'copy');
       tile.append(quick);
       hydrateMeta(item, tile);
       tile.onclick = () => {
@@ -2115,7 +2532,7 @@
       if (state.activeTab === 'video') {
         const help = document.createElement('p');
         help.className = 'sl-vhelp';
-        help.textContent = '위에 있는 것부터 추천 순서입니다. 「원본 파일」이 가장 빠르고, 「DASH/HLS → MP4」는 새 탭에서 조각을 받아 하나로 합칩니다. 「녹화」는 다른 방법이 없을 때 재생하면서 저장합니다.';
+        help.textContent = '위에 있는 것부터 추천 순서입니다. 「원본 파일」이 가장 빠르고, 「DASH/HLS를 MP4로 합치기」는 새 탭에서 조각을 받아 하나로 합칩니다. 「녹화」는 다른 방법이 없을 때 재생하면서 저장합니다.';
         grid.append(help);
       }
       list.forEach(item => grid.append(makeTile(item)));
@@ -2188,6 +2605,8 @@
         const b = document.createElement('button');
         b.type = 'button';
         b.className = `sl-btn ${cls}${brandBtn ? ' sl-btn-brand' : ''}`;
+        const icon = cls.includes('copy') ? 'copy' : cls.includes('zip') ? 'zip' : cls.includes('meta') ? 'list' : 'save';
+        b.innerHTML = `${iconSvg(icon)}<span class="sl-btn-label"></span>`;
         bar.append(b);
         return b;
       };
@@ -2199,7 +2618,7 @@
         saveBtn.dataset.busy = '1';
         let ok = 0, fail = 0;
         for (let i = 0; i < targets.length; i++) {
-          saveBtn.textContent = `저장 ${i + 1}/${targets.length}`;
+          setButtonText(saveBtn, `저장 ${i + 1}/${targets.length}`);
           await new Promise(resolve => saveItem(targets[i], good => { if (good) ok += 1; else fail += 1; resolve(); }));
           await new Promise(r => setTimeout(r, 250));
         }
@@ -2222,9 +2641,12 @@
         if (!urls.length) { toast('복사할 URL이 없습니다 (SVG 코드는 「코드 복사」를 쓰세요)', 'error'); return; }
         copy(urls.join('\n'));
       };
+      const metaBtn = mk('sl-act-meta', false);
+      metaBtn.title = '선택 항목의 파일명·크기·포맷·원본 주소를 CSV로 저장';
+      metaBtn.onclick = () => exportMetadata(bulkTargets(visibleList()), metaBtn);
       if (state.activeTab === 'svg') {
         const codeBtn = mk('sl-act-code', false);
-        codeBtn.textContent = '코드 복사';
+        codeBtn.innerHTML = `${iconSvg('code')}<span class="sl-btn-label">코드 복사</span>`;
         codeBtn.onclick = () => {
           const codes = bulkTargets(visibleList()).map(item => svgSource(item)).filter(Boolean);
           if (!codes.length) { toast('복사할 SVG 코드가 없습니다', 'error'); return; }
@@ -2236,8 +2658,10 @@
 
     const drawSelected = () => {
       main.textContent = '';
+      if (state.analysis) main.append(renderStyleAnalysis(state.analysis));
       const item = (state.picked || state.candidates[0]);
       if (!item) {
+        if (state.analysis) return;
         const box = document.createElement('div');
         box.className = 'sl-empty';
         box.textContent = emptyText();
@@ -2257,36 +2681,29 @@
         hint.textContent = '긴 상세 이미지입니다. 분할 편집으로 구간을 자를 수 있습니다.';
         card.querySelector('.sl-file-meta').after(hint);
       }
-      if (state.candidates.length > 1) {
-        const more = document.createElement('p');
-        more.className = 'sl-hint sl-hint-muted';
-        const n = state.candidates.filter(i => i.type === 'image').length;
-        more.textContent = `이 페이지에서 이미지 ${n}개를 더 찾았습니다. 「이미지」 탭(단축키 2)에서 한꺼번에 저장할 수 있어요.`;
-        card.append(more);
-      }
       const actions = card.querySelector('.sl-primary-actions');
       fillItemActions(actions, item, {
         onUrl: ev => {
           const existing = card.querySelector('.sl-url-value');
           if (existing) {
             existing.remove();
-            ev.currentTarget.textContent = 'URL 보기';
+            setButtonText(ev.currentTarget, 'URL 보기');
             return;
           }
           const code = document.createElement('code');
           code.className = 'sl-url-value';
           code.textContent = liveUrl(item);
           card.append(code);
-          ev.currentTarget.textContent = 'URL 숨기기';
+          setButtonText(ev.currentTarget, 'URL 숨기기');
         },
         onCodeView: ev => {
           const existing = card.querySelector('.sl-svg-code');
-          if (existing) { existing.remove(); ev.currentTarget.textContent = '코드 보기'; return; }
+          if (existing) { existing.remove(); setButtonText(ev.currentTarget, '코드 보기'); return; }
           const pre = document.createElement('pre');
           pre.className = 'sl-url-value sl-svg-code';
           pre.textContent = svgSource(item) || '코드를 불러오는 중…';
           card.append(pre);
-          ev.currentTarget.textContent = '코드 숨기기';
+          setButtonText(ev.currentTarget, '코드 숨기기');
           if (!svgSource(item) && /\.svg(?:$|[?#])/i.test(item.url || '')) {
             fetchBytes(item.url).then(blob => blob.text()).then(text => {
               item.code = sanitizeSvg(text);
@@ -2349,6 +2766,7 @@
     try { document.documentElement.dispatchEvent(new CustomEvent('sl-extract-now')); } catch { /* ignore */ }
     state.selected = null;
     state.selectedMedia = null;
+    state.analysis = null;
     state.postUrl = postUrl(document.body);
     state.candidates = dedupe([...collectPageMedia(), ...(state.platformMedia || [])])
       .filter(item => item && !(item.type === 'video' && SL.isImageUrl(item.url)));
@@ -2378,27 +2796,33 @@
     document.documentElement.dispatchEvent(new CustomEvent('sl-extract-now', { bubbles: true }));
     await new Promise(resolve => setTimeout(resolve, 80));
 
+    const analysis = analyzeTarget(target);
     const collected = collectTarget(target);
     state.selected = target;
+    state.analysis = analysis;
     const tag = (collected.media?.tagName || target?.tagName || '').toUpperCase();
     const clickedVideo = tag === 'VIDEO';
     const clickedSvg = tag === 'SVG';
     state.selectedMedia = clickedVideo ? collected.media : null;
     state.postUrl = postUrl(target);
+    const textOnly = !!analysis?.text && !analysis.background && !clickedVideo && !clickedSvg;
     const extras = [];
-    if (clickedVideo || ['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'naver', 'kakao', 'daum', 'video'].includes(siteKind())) {
-      extras.push(...collectRecentVideos(collected.media));
+    if (!textOnly) {
+      if (clickedVideo || ['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'naver', 'kakao', 'daum', 'video'].includes(siteKind())) {
+        extras.push(...collectRecentVideos(collected.media));
+      }
+      extras.push(...(state.platformMedia || []));
+      if (isCommerce()) extras.push(...collectCommerce());
+      extras.push(...collectSiteExtras());
+      extras.push(...collectInlineSvg(target));
+      if (siteKind() === 'youtube') extras.push(...collectYouTube(target));
+      if (!clickedSvg) extras.push(...collectArticle(target));
     }
-    extras.push(...(state.platformMedia || []));
-    if (isCommerce()) extras.push(...collectCommerce());
-    extras.push(...collectSiteExtras());
-    extras.push(...collectInlineSvg(target));
-    if (siteKind() === 'youtube') extras.push(...collectYouTube(target));
-    if (!clickedSvg) extras.push(...collectArticle(target));
     const seenVideo = new Set();
     let list = rank(dedupe([...seed, ...collected.candidates, ...extras]), collected.media)
       .filter(item => item && !(SL.isUiJunk(item.url) && item.type !== 'svg' && item.relation !== 'target'));
-    if (clickedSvg) list = list.filter(item => item.type === 'svg');
+    if (textOnly) list = [];
+    else if (clickedSvg) list = list.filter(item => item.type === 'svg');
     else if (clickedVideo) {
       const videos = list.filter(item => {
         if (item.type !== 'video' || !(item.temporary || SL.isVideoUrl(item.url))) return false;
@@ -2416,9 +2840,13 @@
     } else {
       list = list.filter(item => (item.type === 'image' && (SL.isImageUrl(item.url) || item.relation === 'target' || item.element?.tagName === 'IMG')) || item.type === 'svg');
     }
-    state.picked = list.find(item => !isChromeImage(item.element, item.url)) || list[0] || null;
+    // The Selected tab is intentionally single-item: prefer the candidate
+    // produced from the exact Alt+clicked node, then fall back to the ranked
+    // result only when the page did not expose a direct URL.
+    const directPick = list.find(item => item.element && (item.element === collected.media || item.relation === 'target'));
+    state.picked = directPick || list.find(item => !isChromeImage(item.element, item.url)) || list[0] || null;
 
-    state.candidates = dedupe([...list, ...collectPageMedia(), ...(state.platformMedia || [])]);
+    state.candidates = textOnly ? [] : dedupe([...list, ...collectPageMedia(), ...(state.platformMedia || [])]);
     rememberCapture(state.candidates);
     state.activeTab = clickedSvg ? 'svg' : clickedVideo ? 'video' : 'selected';
     if (window !== window.top) {
@@ -2429,6 +2857,7 @@
           data: {
             candidates: state.candidates.map(({ element, ...item }) => item),
             picked: state.picked ? (({ element, ...item }) => item)(state.picked) : null,
+            analysis: plainAnalysis(state.analysis),
             postUrl: state.postUrl,
             activeTab: state.activeTab
           }
@@ -2509,7 +2938,8 @@
     if (p && Date.now() - p.t < 120000) {
       const target = mediaAtPoint(p.x, p.y);
       const isMedia = target?.matches?.('img,video,svg,picture') || target?.closest?.('img,video,svg,picture');
-      if (target && (isMedia || collectTarget(target).candidates.length)) { inspect(target); return; }
+      const visual = analyzeTarget(target);
+      if (target && (isMedia || visual || collectTarget(target).candidates.length)) { inspect(target); return; }
     }
     openPagePanel();
   }
@@ -2543,6 +2973,7 @@
     if (ev.data.type !== 'open' || ev.source === window) return;
     state.candidates = ev.data.data?.candidates || [];
     state.picked = ev.data.data?.picked || state.candidates[0] || null;
+    state.analysis = ev.data.data?.analysis || null;
     state.postUrl = ev.data.data?.postUrl || '';
     state.activeTab = ev.data.data?.activeTab || 'selected';
     render();

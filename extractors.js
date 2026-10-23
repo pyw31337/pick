@@ -3,7 +3,7 @@
   window.__sourceLensExtractors = true;
 
   const IMAGE = /\.(?:jpe?g|png|webp)(?:$|[?#])|images\.unsplash|images\.pexels|cdn\.pixabay|cdn\.dribbble|behance\.net|pstatic\.net|dcimg|namu\.la|kakaocdn|daumcdn|i\.ytimg|i\.vimeocdn|img\.danawa|humoruniv|ygosu\.com/i;
-  const VIDEO = /\.(?:mp4|m4v|webm|mov|m3u8)(?:$|[?#])|videoplayback|googlevideo\.com|player\.vimeo|vod-progressive|tiktokcdn|muscdn|fbcdn\.net\/v\/t[0-9].*mp4|cdninstagram.*mp4|playable_url|bytevod|naver\.net\/.*(?:mp4|hls)|daumcdn.*mp4/i;
+  const VIDEO = /\.(?:mp4|m4v|webm|mov|m3u8|mpd)(?:$|[?#])|videoplayback|googlevideo\.com|player\.vimeo|vod-progressive|tiktokcdn|muscdn|fbcdn\.net\/v\/t[0-9].*mp4|cdninstagram.*mp4|playable_url|bytevod|naver\.net\/.*(?:mp4|hls)|daumcdn.*(?:mp4|m3u8|mpd)/i;
   const SKIP = /logo|sprite|favicon|1x1|pixel|tracking|adservice|doubleclick|facebook\.com\/tr|nolmg_|noimg/i;
 
   const images = new Map();
@@ -18,14 +18,18 @@
     if (typeof SourceLens?.unwrapMediaUrl === 'function') value = SourceLens.unwrapMediaUrl(value) || value;
     if (!value || !/^https?:/i.test(value) || SKIP.test(value)) return;
     if (type === 'video') {
-      if (IMAGE.test(value) && !/\.mp4/i.test(value)) return;
+      // Korean CDN hostnames (daumcdn/kakaocdn) also serve HLS manifests;
+      // do not let the broad image-host hint hide .m3u8/.mpd video sources.
+      if (IMAGE.test(value) && !/\.(?:mp4|m4v|webm|mov|m3u8|mpd)(?:$|[?#])/i.test(value)) return;
       if (/i\.ytimg|i\.vimeocdn/i.test(value)) return;
       if (!VIDEO.test(value) && !/\/video\//i.test(value)) return;
       if (!videos.has(value)) videos.set(value, { url: value, type: 'video', source });
       return;
     }
     if (!IMAGE.test(value) && !/scontent|fbcdn|ytimg|pstatic|kakaocdn|daumcdn|coupangcdn|gmarket|danawa|ygosu|humoruniv/i.test(value)) return;
-    if (VIDEO.test(value) && /\.mp4/i.test(value)) return;
+    // A video URL can be exposed under generic `contentUrl`/thumbnail keys;
+    // keep it out of the image tab even when the CDN has no file extension.
+    if (VIDEO.test(value)) return;
     if (!images.has(value)) images.set(value, { url: value, type: 'image', source });
   }
 
@@ -69,14 +73,20 @@
     if (Array.isArray(node.video_versions)) {
       node.video_versions.forEach(v => push(takeUrl(v), 'video', 'video_versions'));
     }
-    if (Array.isArray(node.formats)) {
-      node.formats.forEach(f => {
-        if (!f?.url || f.signatureCipher) return;
-        if (/video\/mp4/i.test(f.mimeType || '') && f.width && f.audioQuality) {
-          push(f.url, 'video', `YouTube ${f.qualityLabel || f.itag || 'mp4'}`);
-        }
-      });
-    }
+    const ytFormats = [
+      ...(Array.isArray(node.formats) ? node.formats : []),
+      ...(Array.isArray(node.adaptiveFormats) ? node.adaptiveFormats : []),
+      ...(Array.isArray(node.streamingData?.formats) ? node.streamingData.formats : []),
+      ...(Array.isArray(node.streamingData?.adaptiveFormats) ? node.streamingData.adaptiveFormats : [])
+    ];
+    ytFormats.forEach(f => {
+      // Ciphered YouTube URLs need player-side signature deciphering and must not be guessed.
+      if (!f?.url || f.signatureCipher || f.cipher) return;
+      const mime = String(f.mimeType || f.type || '');
+      if (/video\/mp4/i.test(mime) && (f.width || f.height || f.qualityLabel)) {
+        push(f.url, 'video', `YouTube ${f.qualityLabel || f.quality || f.itag || 'mp4'}`);
+      }
+    });
     if (Array.isArray(node.progressive)) {
       node.progressive.forEach(f => push(takeUrl(f), 'video', 'Vimeo progressive'));
     }
