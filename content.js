@@ -254,6 +254,10 @@
       poster: extra.poster || extra.thumbnail || '',
       thumbnail: extra.thumbnail || extra.poster || '',
       audioOnly: !!extra.audioOnly,
+      family: extra.family || '',
+      weight: extra.weight || '',
+      style: extra.style || '',
+      format: extra.format || '',
       fp: extra.fp || '',
       relation: extra.relation || 'target',
       rewritten
@@ -914,6 +918,63 @@
     return out.slice(0, 80);
   }
 
+  function collectPageFonts() {
+    const out = [];
+    const seen = new Set();
+    const add = (value, extra = {}) => {
+      const url = abs(value);
+      if (!url || !SL.FONT_EXT.test(url) || seen.has(url)) return;
+      seen.add(url);
+      const family = String(extra.family || '').replace(/["']/g, '').trim();
+      const weight = String(extra.weight || '').trim();
+      const style = String(extra.style || '').trim();
+      const name = [family || fileName(url) || 'font', weight && `w${weight}`, style && style !== 'normal' && style].filter(Boolean).join(' · ');
+      const item = candidate(url, '페이지 글꼴', 'font', {
+        confidence: extra.confidence || '높음', relation: 'page', name, family, weight, style,
+        format: extra.format || ''
+      });
+      if (item) out.push(item);
+    };
+    const parseFace = text => {
+      const blocks = String(text || '').match(/@font-face\s*\{[^}]*\}/gi) || [];
+      blocks.forEach(block => {
+        const read = key => block.match(new RegExp(`${key}\\s*:\\s*([^;}]*)`, 'i'))?.[1]?.trim() || '';
+        const src = read('src');
+        const family = read('font-family');
+        const weight = read('font-weight');
+        const style = read('font-style');
+        const format = src.match(/format\(\s*["']?([^"')]+)["']?\s*\)/i)?.[1] || '';
+        const re = /url\(\s*["']?([^"')]+)["']?\s*\)/gi;
+        let m;
+        while ((m = re.exec(src))) add(m[1], { family, weight, style, format });
+      });
+    };
+    deepAll('style').forEach(style => parseFace(style.textContent));
+    try {
+      [...document.styleSheets].forEach(sheet => {
+        let rules;
+        try { rules = sheet.cssRules || []; } catch { return; }
+        [...rules].forEach(rule => {
+          if (rule.type === CSSRule.FONT_FACE_RULE || /^@font-face/i.test(rule.cssText || '')) {
+            const src = rule.style?.src || '';
+            const format = src.match(/format\(\s*["']?([^"')]+)["']?\s*\)/i)?.[1] || '';
+            const re = /url\(\s*["']?([^"')]+)["']?\s*\)/gi;
+            let m;
+            while ((m = re.exec(src))) add(m[1], {
+              family: rule.style?.fontFamily || '', weight: rule.style?.fontWeight || '',
+              style: rule.style?.fontStyle || '', format
+            });
+          }
+        });
+      });
+    } catch { /* cross-origin stylesheets are intentionally skipped */ }
+    deepAll('link[rel="preload"][as="font"][href],link[href]').forEach(link => {
+      const url = link.href || link.getAttribute('href') || '';
+      if (SL.FONT_EXT.test(url)) add(url, { confidence: '중간' });
+    });
+    return out.slice(0, 120);
+  }
+
   function collectYouTube(target) {
     const out = [];
     const nearby = target?.closest?.('a[href], ytd-rich-item-renderer, ytd-video-renderer, ytd-player') || target;
@@ -956,6 +1017,10 @@
       stream: !!item.stream,
       audioOnly: !!item.audioOnly,
       poster: item.poster || item.thumbnail || '',
+      family: item.family || '',
+      weight: item.weight || '',
+      style: item.style || '',
+      format: item.format || '',
       signed: (item.flags || []).includes('signed'),
       code: code.length < 120000 ? code : ''
     };
@@ -973,6 +1038,7 @@
       images: all.filter(i => i.type === 'image'),
       videos,
       svgs: all.filter(i => i.type === 'svg'),
+      fonts: all.filter(i => i.type === 'font'),
       host: location.hostname,
       title: document.title,
       top: window === window.top,
@@ -1096,6 +1162,7 @@
       confidence: '중간', relation: 'page'
     })).filter(Boolean);
     const svgs = collectPageSvgs();
+    const fonts = collectPageFonts();
     const canvases = deepAll('canvas').map(canvas => {
       if (canvas.closest?.('#sl-host')) return null;
       const width = canvas.width || canvas.clientWidth || 0;
@@ -1116,7 +1183,7 @@
     }).filter(Boolean);
     let backgrounds = [];
     try { backgrounds = collectBackgrounds(); } catch { /* ignore */ }
-    return [...images, ...videos, ...sources, ...audios, ...audioSources, ...posters, ...canvases, ...svgs, ...collectCatalogMedia(), ...backgrounds, ...collectSiteExtras()];
+    return [...images, ...videos, ...sources, ...audios, ...audioSources, ...posters, ...canvases, ...svgs, ...fonts, ...collectCatalogMedia(), ...backgrounds, ...collectSiteExtras()];
   }
 
   function collectSiteExtras() {
@@ -1346,6 +1413,12 @@
   }
 
   function mediaNode(item, className) {
+    if (item.type === 'font') {
+      const holder = document.createElement('div');
+      holder.className = `sl-font-media ${className || ''}`;
+      holder.innerHTML = `<strong>Aa</strong><span>${esc(item.family || item.format || SL.extOf(item.url, 'font'))}</span>`;
+      return holder;
+    }
     if (item.type === 'svg' || /\.svg(?:$|[?#])/i.test(item.url || '') || /^data:image\/svg/i.test(item.url || '')) {
       const holder = document.createElement('div');
       holder.className = `sl-svg-media ${className || ''}`;
@@ -1408,6 +1481,7 @@
     image: '<path d="M5 4h22a3 3 0 0 1 3 3v18a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z"/><circle cx="10" cy="11" r="3" fill="#1c1c1c"/><path d="m4 25 8-8 5 5 4-4 6 7H4Z" fill="#1c1c1c"/>',
     video: '<path d="M4 6h16a3 3 0 0 1 3 3v2l6-4v18l-6-4v2a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3Z"/><path d="m12 11 7 5-7 5v-10Z" fill="#1c1c1c"/>',
     code: '<path d="m12 5 3 3-6 6 6 6-3 3-9-9 9-9Zm8 0 9 9-9 9-3-3 6-6-6-6 3-3Z"/>',
+    text: '<path d="M4 5h24v5h-9v17h-6V10H4V5Z"/>',
     slice: '<path d="M4 6h24v4H4V6Zm0 9h24v4H4v-4Zm0 9h24v4H4v-4ZM9 3h4v26H9V3Zm10 0h4v26h-4V3Z"/>',
     list: '<path d="M5 5h5v5H5V5Zm0 9h5v5H5v-5Zm0 9h5v5H5v-5Zm8-18h14v5H13V5Zm0 9h14v5H13v-5Zm0 9h14v5H13v-5Z"/>',
     terminal: '<path d="M4 4h24a3 3 0 0 1 3 3v18a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z"/><path d="m8 11 5 5-5 5-3-3 2-2-2-2 3-3Zm8 8h8v4h-8v-4Z" fill="#1c1c1c"/>',
@@ -1883,7 +1957,7 @@
     const payload = items.slice(0, 40).map((item, i) => ({
       url: item.url,
       code: item.type === 'svg' ? (item.code || '') : '',
-      name: `${String(i + 1).padStart(2, '0')}-${downloadName(item)}`
+      name: `${item.kind ? 'video' : item.type === 'svg' ? 'svg' : item.type === 'font' ? 'font' : item.type === 'video' ? 'video' : 'image'}/${String(i + 1).padStart(2, '0')}-${downloadName(item)}`
     }));
     if (button) { button.disabled = true; setButtonText(button, 'ZIP 만드는 중…'); }
     chrome.runtime.sendMessage({
@@ -2412,10 +2486,11 @@
         <button data-tab="image" title="단축키 2">${iconSvg('image')}<span class="sl-tab-label">이미지</span> <b>0</b></button>
         <button data-tab="video" title="단축키 3">${iconSvg('video')}<span class="sl-tab-label">영상</span> <b>0</b></button>
         <button data-tab="svg" title="단축키 4">${iconSvg('code')}<span class="sl-tab-label">SVG</span> <b>0</b></button>
+        <button data-tab="font" title="단축키 5">${iconSvg('text')}<span class="sl-tab-label">글꼴</span> <b>0</b></button>
       </nav>
       <div class="sl-tools"></div>
       <main class="sl-main"></main>
-      <footer class="sl-foot">Alt(⌥)+클릭: 다른 요소 분석 · <kbd>1</kbd>–<kbd>4</kbd> 탭 · <kbd>/</kbd> 검색 · <kbd>S</kbd> 저장 · <kbd>C</kbd> 복사 · <kbd>Esc</kbd> 닫기</footer>`;
+      <footer class="sl-foot">Alt(⌥)+클릭: 다른 요소 분석 · <kbd>1</kbd>–<kbd>5</kbd> 탭 · <kbd>/</kbd> 검색 · <kbd>S</kbd> 저장 · <kbd>C</kbd> 복사 · <kbd>Esc</kbd> 닫기</footer>`;
     $('.sl-close', panel).onclick = closePanel;
     $('.sl-dock', panel).onclick = () => {
       state.dock = state.dock === 'left' ? 'right' : 'left';
@@ -2433,6 +2508,7 @@
       const videoCount = videoBtn.querySelector('b');
       if (videoCount) videoCount.textContent = dedupe([...(state.videoItems || []), ...state.candidates.filter(item => item.type === 'video')]).filter(i => i.kind !== 'drm').length;
       panel.querySelector('[data-tab="svg"] b').textContent = state.candidates.filter(i => i.type === 'svg').length;
+      panel.querySelector('[data-tab="font"] b').textContent = state.candidates.filter(i => i.type === 'font').length;
     };
 
     const updateBulk = () => {
@@ -2509,6 +2585,7 @@
       if (state.activeTab === 'video') return videoEmptyMessage();
       if (state.query.trim()) return `「${state.query.trim()}」에 맞는 항목이 없습니다. 검색어를 지워 보세요.`;
       if (state.activeTab === 'svg') return '표시할 SVG가 없습니다. 아이콘을 직접 Alt(⌥)+클릭해 보세요.';
+      if (state.activeTab === 'font') return '페이지에서 @font-face 글꼴을 찾지 못했습니다.';
       if (state.activeTab === 'image' && state.minPx) return `${state.minPx}px 이상 이미지가 없습니다. 크기 필터를 「모든 크기」로 바꿔 보세요.`;
       if (state.activeTab === 'selected') return '분석한 요소가 없습니다. 이미지·영상을 Alt(⌥)+클릭하거나 「이미지」 탭을 보세요.';
       return '표시할 미디어가 없습니다. 페이지를 스크롤해 이미지를 불러온 뒤 다시 확인하세요.';
@@ -2773,7 +2850,7 @@
     const images = state.candidates.filter(i => i.type === 'image');
     state.picked = images.slice().sort((a, b) => itemPixel(b) - itemPixel(a))[0] || state.candidates[0] || null;
     const count = type => state.candidates.filter(i => i.type === type).length;
-    state.activeTab = preferTab || (count('image') ? 'image' : count('video') ? 'video' : count('svg') ? 'svg' : 'image');
+    state.activeTab = preferTab || (count('image') ? 'image' : count('video') ? 'video' : count('svg') ? 'svg' : count('font') ? 'font' : 'image');
     state.selectedKeys.clear();
     render();
     requestFrameMedia();
@@ -3054,7 +3131,7 @@
       return;
     }
     if (!state.panel) return;
-    const tabs = { 1: 'selected', 2: 'image', 3: 'video', 4: 'svg' };
+    const tabs = { 1: 'selected', 2: 'image', 3: 'video', 4: 'svg', 5: 'font' };
     if (!box && tabs[ev.key]) { state.switchTab?.(tabs[ev.key]); ev.stopPropagation(); return; }
     if (!box && ev.key === '/') { ev.preventDefault(); ev.stopPropagation(); state.focusSearch?.(); return; }
     const current = state.lightboxItem || state.picked;

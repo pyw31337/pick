@@ -20,6 +20,7 @@ test('downloadName keeps a sensible extension', () => {
   assert.strictEqual(SL.downloadName({ url: 'https://a.com/img?id=3&format=webp', type: 'image' }, 'foo.com'), 'foo.com-img.webp');
   assert.strictEqual(SL.downloadName({ url: 'data:image/svg+xml,abc', type: 'svg', name: 'arrow right' }, 'foo.com'), 'foo.com-arrow-right.svg');
   assert.strictEqual(SL.downloadName({ url: 'https://v.com/stream/abc', type: 'video' }, 'v.com'), 'v.com-abc.mp4');
+  assert.strictEqual(SL.downloadName({ url: 'https://cdn.com/fonts/pretendard.woff2', type: 'font' }, 'cdn.com'), 'cdn.com-pretendard.woff2');
 });
 
 test('URL lock table: signed / locked CDNs are never rewritten', () => {
@@ -39,4 +40,6 @@ test('classifyUrl basics', () => {
   assert.strictEqual(SL.classifyUrl('https://x.com/a.jpg').type, 'image');
   assert.ok(SL.classifyUrl('https://x.com/a.m3u8').stream);
   assert.strictEqual(SL.classifyUrl('data:image/svg+xml,<svg/>').type, 'svg');
+  assert.strictEqual(SL.classifyUrl('https://x.com/fonts/ui.woff2').type, 'font');
+  assert.strictEqual(SL.classifyUrl('https://x.com/font', 'font').type, 'font');
 });

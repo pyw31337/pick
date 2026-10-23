@@ -18,13 +18,14 @@ function setButtonText(button, text) {
 }
 const state = {
   tab: null,
-  data: { images: [], videos: [], svgs: [] },
+  data: { images: [], videos: [], svgs: [], fonts: [] },
   view: 'images',
   query: '',
   minPx: 0,
   selected: new Set(),
   host: '',
-  videoLocked: false
+  videoLocked: false,
+  multiTab: false
 };
 
 function setStatus(text, kind) {
@@ -39,6 +40,11 @@ function savePrefs(patch) {
 
 function activeTab() {
   return new Promise(resolve => api.tabs.query({ active: true, currentWindow: true }, tabs => resolve(tabs[0])));
+}
+
+function tabById(id) {
+  if (!Number.isInteger(id)) return Promise.resolve(null);
+  return new Promise(resolve => api.tabs.get(id, tab => resolve(api.runtime.lastError ? null : tab)));
 }
 
 function exec(tabId, details) {
@@ -61,14 +67,15 @@ async function collect(tab) {
     await new Promise(r => setTimeout(r, 250));
     run = await exec(tab.id, { func: listInFrame });
   }
-  const merged = { images: [], videos: [], svgs: [] };
+  const merged = { images: [], videos: [], svgs: [], fonts: [] };
   const seen = new Set();
   let videoLocked = false;
   run.results.forEach(r => {
     const res = r && r.result;
     if (!res) return;
     if (res.top) videoLocked = !!res.videoLocked;
-    ['images', 'videos', 'svgs'].forEach(kind => (res[kind] || []).forEach(item => {
+    ['images', 'videos', 'svgs', 'fonts'].forEach(kind => (res[kind] || []).forEach(item => {
+      item = { ...item, tabId: tab.id, pageUrl: tab.url, pageTitle: tab.title || '', host: (() => { try { return new URL(tab.url).hostname; } catch { return ''; } })() };
       if (kind === 'videos') item = { ...item, frameId: r.frameId };
       const key = kind === 'videos'
         ? `v:${item.kind}:${item.url || (item.job && (item.job.url || (item.job.xml || '').slice(0, 300))) || `${r.frameId}:${item.vid}`}`
@@ -80,6 +87,44 @@ async function collect(tab) {
   });
   merged.images.sort((a, b) => (b.px || 0) - (a.px || 0));
   return { ...merged, videoLocked };
+}
+
+async function collectOpenTabs() {
+  const tabs = await new Promise(resolve => api.tabs.query({ currentWindow: true }, resolve));
+  const pages = (tabs || []).filter(tab => /^https?:/i.test(tab.url || ''));
+  const merged = { images: [], videos: [], svgs: [], fonts: [] };
+  const seen = new Set();
+  const errors = [];
+  for (const tab of pages) {
+    try {
+      const data = await collect(tab);
+      ['images', 'videos', 'svgs', 'fonts'].forEach(kind => (data[kind] || []).forEach(item => {
+        const key = `${kind}:${keyOf(item)}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        merged[kind].push(item);
+      }));
+    } catch (error) {
+      errors.push(`${tab.title || tab.url}: ${error.message || error}`);
+    }
+  }
+  merged.images.sort((a, b) => (b.px || 0) - (a.px || 0));
+  return { ...merged, videoLocked: false, pages: pages.length, errors };
+}
+
+function rememberPopupHistory(tab, data) {
+  if (!tab?.url || !/^https?:/i.test(tab.url)) return;
+  const row = {
+    page: tab.url,
+    title: (tab.title || '').slice(0, 100),
+    host: (() => { try { return new URL(tab.url).hostname.replace(/^www\./, ''); } catch { return ''; } })(),
+    ts: Date.now(),
+    items: ['images', 'videos', 'svgs', 'fonts'].flatMap(kind => (data[kind] || []).slice(0, 3).map(item => ({ url: item.url, type: item.type, name: item.name || item.source || '' })))
+  };
+  api.storage.local.get('slHistory', saved => {
+    const list = [row, ...(saved.slHistory || []).filter(item => item.page !== row.page)].slice(0, 20);
+    api.storage.local.set({ slHistory: list });
+  });
 }
 
 function visible() {
@@ -130,6 +175,7 @@ function emptyMessage() {
   }
   if (state.view === 'images' && state.minPx && (state.data.images || []).length) return `${state.minPx}px 이상 이미지가 없습니다. 크기 필터를 「모든 크기」로 바꿔 보세요.`;
   if (state.view === 'svgs') return '찾은 SVG가 없습니다.';
+  if (state.view === 'fonts') return '페이지에서 @font-face 글꼴을 찾지 못했습니다.';
   return '찾은 이미지가 없습니다. 페이지를 아래로 스크롤해 이미지를 불러온 뒤 ↻ 를 눌러 보세요.';
 }
 
@@ -148,6 +194,16 @@ function thumb(item) {
     const box = document.createElement('div');
     box.className = 'thumb video-thumb';
     box.textContent = item.temporary ? '▶ 세션 영상' : item.stream ? '▶ 스트림' : '▶ 영상';
+    return box;
+  }
+  if (item.type === 'font') {
+    const box = document.createElement('div');
+    box.className = 'thumb font-thumb';
+    const strong = document.createElement('strong');
+    strong.textContent = 'Aa';
+    const small = document.createElement('small');
+    small.textContent = item.family || item.format || SL.extOf(item.url, 'font');
+    box.append(strong, small);
     return box;
   }
   const img = document.createElement('img');
@@ -170,7 +226,7 @@ function thumb(item) {
 function render() {
   const listEl = $('#list');
   listEl.textContent = '';
-  ['images', 'videos', 'svgs'].forEach(kind => {
+  ['images', 'videos', 'svgs', 'fonts'].forEach(kind => {
     $(`#n-${kind}`).textContent = kind === 'videos' ? state.data.videos.filter(v => v.kind !== 'drm').length : state.data[kind].length;
   });
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === state.view));
@@ -199,7 +255,7 @@ function render() {
     const tile = document.createElement('div');
     tile.className = 'tile';
     if (state.selected.has(key)) tile.classList.add('checked');
-    tile.title = `${item.name || ''}\n${/^data:/i.test(item.url) ? '(인라인 SVG)' : item.url}\n${item.state || ''}`;
+    tile.title = `${item.name || ''}\n${item.pageTitle || item.host || ''}\n${/^data:/i.test(item.url) ? '(인라인 SVG)' : item.url}\n${item.state || ''}`;
     const box = document.createElement('input');
     box.type = 'checkbox';
     box.className = 'check';
@@ -217,7 +273,7 @@ function render() {
     const meta = document.createElement('div');
     meta.className = 'meta';
     const dims = item.width && item.height ? `${item.width}×${item.height}` : item.width ? `폭 ${item.width}px` : '';
-    meta.textContent = [dims, item.signed ? '만료 주소' : '', item.frame === 'frame' ? '프레임' : ''].filter(Boolean).join(' · ') || (item.source || '');
+    meta.textContent = [dims, item.signed ? '만료 주소' : '', item.frame === 'frame' ? '프레임' : '', state.multiTab ? (item.host || '') : ''].filter(Boolean).join(' · ') || (item.source || '');
     tile.append(meta);
     const actions = document.createElement('div');
     actions.className = 'actions';
@@ -297,7 +353,7 @@ function videoRow(item) {
 }
 
 async function saveVideo(item, button) {
-  const tab = state.tab || await activeTab();
+  const tab = await tabById(item.tabId) || state.tab || await activeTab();
   if (item.kind === 'drm') { setStatus(item.note, 'error'); return { ok: false }; }
   if (item.kind === 'direct') {
     if (button) setButtonText(button, '확인 중…');
@@ -307,7 +363,7 @@ async function saveVideo(item, button) {
     return res;
   }
   if (item.kind === 'dash' || item.kind === 'hls') {
-    const host = state.host.replace(/^www\./, '');
+    const host = (item.host || state.host).replace(/^www\./, '');
     const res = await sendMessage({ type: 'mediaJob', tabId: tab?.id, job: { ...item.job, file: item.file, title: item.title, host, quality: 0 } });
     setStatus(res.ok ? '새 탭에서 받아 하나의 MP4로 합칩니다.' : `시작하지 못했습니다: ${res.error || ''}`, res.ok ? '' : 'error');
     return res;
@@ -388,7 +444,7 @@ async function load() {
   state.host = host;
   $('#pageHost').textContent = host || '현재 페이지';
   if (!/^https?:/i.test(tab.url || '')) {
-    state.data = { images: [], videos: [], svgs: [] };
+    state.data = { images: [], videos: [], svgs: [], fonts: [] };
     render();
     $('#list').innerHTML = '<p class="empty">이 페이지(브라우저 설정·새 탭·웹스토어 등)는 보안상 확장 프로그램이 분석할 수 없습니다. 일반 웹사이트에서 열어 주세요.</p>';
     ['#openPanel', '#oneClickVideo'].forEach(sel => { $(sel).disabled = true; });
@@ -400,20 +456,43 @@ async function load() {
     const data = await collect(tab);
     state.data = data;
     state.videoLocked = data.videoLocked;
-    const known = new Set(['images', 'videos', 'svgs'].flatMap(k => data[k].map(keyOf)));
+    const known = new Set(['images', 'videos', 'svgs', 'fonts'].flatMap(k => data[k].map(keyOf)));
     state.selected.forEach(k => { if (!known.has(k)) state.selected.delete(k); });
     if (!state.data[state.view].length) {
-      state.view = ['images', 'videos', 'svgs'].find(k => state.data[k].length) || state.view;
+      state.view = ['images', 'videos', 'svgs', 'fonts'].find(k => state.data[k].length) || state.view;
     }
+    state.multiTab = false;
+    rememberPopupHistory(tab, data);
     render();
   } catch (error) {
-    state.data = { images: [], videos: [], svgs: [] };
+    state.data = { images: [], videos: [], svgs: [], fonts: [] };
     render();
     setStatus(`이 페이지를 읽지 못했습니다. 페이지를 새로고침(Cmd+R / F5)한 뒤 다시 열어 주세요. (${error.message || error})`, 'error');
   }
 }
 
 $('#refresh').onclick = load;
+$('#collectTabs').onclick = async () => {
+  setStatus('열린 탭을 수집하는 중…');
+  $('#collectTabs').disabled = true;
+  try {
+    const data = await collectOpenTabs();
+    state.data = data;
+    state.multiTab = true;
+    state.host = `${data.pages || 0}개 탭`;
+    $('#pageHost').textContent = state.host;
+    const known = new Set(['images', 'videos', 'svgs', 'fonts'].flatMap(k => data[k].map(keyOf)));
+    state.selected.forEach(k => { if (!known.has(k)) state.selected.delete(k); });
+    state.view = state.data[state.view]?.length ? state.view : (['images', 'videos', 'svgs', 'fonts'].find(k => state.data[k].length) || 'images');
+    render();
+    const note = data.errors?.length ? ` · ${data.errors.length}개 탭은 제한됨` : '';
+    setStatus(`${data.pages || 0}개 탭에서 자산을 모았습니다${note}`, data.errors?.length === data.pages ? 'error' : '');
+  } catch (error) {
+    setStatus(`탭을 수집하지 못했습니다: ${error.message || error}`, 'error');
+  } finally {
+    $('#collectTabs').disabled = false;
+  }
+};
 $('#settings').onclick = () => api.runtime.openOptionsPage();
 document.querySelectorAll('.tabs button').forEach(btn => {
   btn.onclick = () => {
@@ -475,7 +554,7 @@ $('#zip').onclick = () => {
     items: items.map((x, i) => ({
       url: x.type === 'svg' && x.code ? '' : x.url,
       code: x.type === 'svg' ? (x.code || '') : '',
-      name: `${String(i + 1).padStart(2, '0')}-${x.file || 'media'}`
+      name: `${x.kind ? 'video' : x.type === 'svg' ? 'svg' : x.type === 'font' ? 'font' : x.type === 'video' ? 'video' : 'image'}/${String(i + 1).padStart(2, '0')}-${x.file || 'media'}`
     })),
     filename: `lets-pick/${(state.host || 'page').replace(/^www\./, '')}-media.zip`
   }, result => {
@@ -488,7 +567,7 @@ $('#zip').onclick = () => {
 $('#openPanel').onclick = async () => {
   const tab = state.tab || await activeTab();
   if (!tab) return;
-  const tabName = { images: 'image', videos: 'video', svgs: 'svg' }[state.view];
+  const tabName = { images: 'image', videos: 'video', svgs: 'svg', fonts: 'font' }[state.view];
   api.tabs.sendMessage(tab.id, { type: 'openPanel', tab: tabName }, { frameId: 0 }, () => {
     if (api.runtime.lastError) {
       setStatus('페이지에 연결하지 못했습니다. 페이지를 새로고침한 뒤 다시 눌러 주세요.', 'error');

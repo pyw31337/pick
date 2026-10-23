@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Let's Pick",
   "short_name": "Let's Pick",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "페이지의 이미지·영상·SVG 원본을 찾아 저장합니다. 인스타·페북 원본 영상, HLS/DASH 스트림 합치기, 유튜브 녹화 저장을 지원하는 Let's Pick.",
   "permissions": [
     "contextMenus",
@@ -10,6 +10,7 @@
     "storage",
     "scripting",
     "downloads",
+    "tabs",
     "activeTab",
     "declarativeNetRequest",
     "declarativeNetRequestWithHostAccess"

@@ -19,12 +19,14 @@
       <svg class="btn-icon" viewBox="0 0 32 32" aria-hidden="true"><rect x="5" y="6" width="22" height="20" rx="3"/><path d="M9 11h14M9 16h9M9 21h12"/></svg><span class="btn-label">페이지에서 크게 보기</span> <kbd id="panelKey">Alt+Shift+D</kbd>
     </button>
     <button id="oneClickVideo" type="button" title="재생 중인 영상을 원본 파일로 저장하거나, 막혀 있으면 끝까지 녹화합니다"><svg class="btn-icon" viewBox="0 0 32 32" aria-hidden="true"><rect x="4" y="7" width="24" height="18" rx="3"/><path d="m13 12 7 4-7 4v-8Z"/></svg><span class="btn-label">영상 저장</span></button>
+    <button id="collectTabs" type="button" title="현재 창의 웹페이지 탭을 모두 수집합니다"><svg class="btn-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="M5 7h17v18H5z"/><path d="M10 3h17v18h-4V7H10z"/></svg><span class="btn-label">열린 탭 수집</span></button>
   </div>
 
   <nav class="tabs" role="tablist">
     <button data-tab="images" class="active" type="button"><svg class="tab-icon" viewBox="0 0 32 32" aria-hidden="true"><rect x="5" y="5" width="22" height="22" rx="3"/><circle cx="11" cy="12" r="2"/><path d="m6 23 7-7 4 4 3-3 6 6"/></svg>이미지 <b id="n-images">0</b></button>
     <button data-tab="videos" type="button"><svg class="tab-icon" viewBox="0 0 32 32" aria-hidden="true"><rect x="4" y="7" width="24" height="18" rx="3"/><path d="m13 12 7 4-7 4v-8Z"/></svg>영상 <b id="n-videos">0</b></button>
     <button data-tab="svgs" type="button"><svg class="tab-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="m12 8-6 8 6 8M20 8l6 8-6 8M18 5l-4 22"/></svg>SVG <b id="n-svgs">0</b></button>
+    <button data-tab="fonts" type="button"><svg class="tab-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 5h24v5h-9v17h-6V10H4V5Z"/></svg>글꼴 <b id="n-fonts">0</b></button>
   </nav>
 
   <div class="filters">

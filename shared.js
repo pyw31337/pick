@@ -2,6 +2,8 @@
   const SL = root.SourceLens = root.SourceLens || {};
 
   SL.MEDIA_EXT = /\.(?:mp4|m4v|mov|webm|mkv|ogv|avi|3gp|m3u8|mpd|ts|m4s|mp3|m4a|wav|ogg|oga|aac|flac)(?:$|[?#])/i;
+  SL.FONT_EXT = /\.(?:woff2?|ttf|otf|eot)(?:$|[?#])/i;
+  SL.FONT_MIME = /^(?:font\/|application\/(?:font|x-font|vnd\.ms-fontobject))/i;
   SL.IMAGE_EXT = /\.(?:jpe?g|png|gif|webp|avif|bmp|svg|ico|jfif|heic)(?:$|[?#])/i;
   SL.PHOTO_EXT = /\.(?:jpe?g|png|webp|avif|bmp|jfif|heic)(?:$|[?#])/i;
   SL.SIGNED = /(?:X-Amz-Signature|X-Amz-Expires|X-Amz-Credential|Key-Pair-Id|Policy=|Signature=|Expires=|oh=|oe=|_nc_ohc|_nc_ht|_nc_sid|expire=|exp=)/i;
@@ -240,6 +242,10 @@
     if (hint === 'svg' || /^data:image\/svg/i.test(url)) {
       return { type: 'svg', flags: [], state: 'SVG', temporary: false, stream: false };
     }
+    if (hint === 'font' || SL.FONT_EXT.test(url)) {
+      const signed = SL.SIGNED.test(url);
+      return { type: 'font', flags: signed ? ['signed'] : [], state: signed ? '서명·만료 가능 URL' : '글꼴 주소', temporary: false, stream: false };
+    }
     if (SL.PHOTO_EXT.test(url) || SL.isImageUrl(url) || hint === 'image') {
       if (!SL.isVideoUrl(url) || SL.PHOTO_EXT.test(url)) {
         const signed = SL.SIGNED.test(url);
@@ -324,20 +330,22 @@
   SL.extOf = function extOf(url, type, mime) {
     const fromMime = {
       'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/avif': 'avif', 'image/gif': 'gif',
-      'image/svg+xml': 'svg', 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov'
+      'image/svg+xml': 'svg', 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
+      'font/woff': 'woff', 'font/woff2': 'woff2', 'font/ttf': 'ttf', 'font/otf': 'otf',
+      'application/font-woff': 'woff', 'application/vnd.ms-fontobject': 'eot'
     }[String(mime || '').split(';')[0].toLowerCase()];
     if (fromMime) return fromMime;
     if (/^data:image\/svg/i.test(url || '')) return 'svg';
     try {
       const path = new URL(url, 'https://x.invalid').pathname;
       const m = /\.([a-z0-9]{2,5})$/i.exec(path);
-      if (m && /^(?:jpe?g|png|gif|webp|avif|bmp|svg|ico|jfif|heic|mp4|m4v|mov|webm|mkv|ogv|m3u8|mpd)$/i.test(m[1])) {
+      if (m && /^(?:jpe?g|png|gif|webp|avif|bmp|svg|ico|jfif|heic|mp4|m4v|mov|webm|mkv|ogv|m3u8|mpd|woff2?|ttf|otf|eot)$/i.test(m[1])) {
         return m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
       }
       const fmt = new URL(url, 'https://x.invalid').searchParams.get('format') || new URL(url, 'https://x.invalid').searchParams.get('fm');
       if (fmt && /^(?:jpe?g|png|webp|avif|gif)$/i.test(fmt)) return fmt.toLowerCase().replace('jpeg', 'jpg');
     } catch { /* ignore */ }
-    return type === 'svg' ? 'svg' : type === 'video' ? 'mp4' : 'jpg';
+    return type === 'svg' ? 'svg' : type === 'video' ? 'mp4' : type === 'font' ? 'woff2' : 'jpg';
   };
 
   SL.downloadName = function downloadName(item, host) {
