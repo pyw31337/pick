@@ -1,4 +1,4 @@
-/* Source Lens — runs in the page (MAIN world) at document_start.
+/* Let's Pick — runs in the page (MAIN world) at document_start.
    1) Watches fetch/XHR for media URLs and stream manifests (.m3u8 / .mpd).
    2) Reads platform JSON (Instagram, Facebook, generic JSON-LD) and groups video URLs per video.
    3) Notices DRM (Encrypted Media Extensions) so the extension can say "protected" instead of failing silently. */

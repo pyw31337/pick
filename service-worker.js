@@ -77,9 +77,9 @@ async function prefs() {
 
 async function targetName(filename) {
   const p = await prefs();
-  const folder = String(p.folder || 'source-lens').replace(/[\\:*?"<>|]+/g, '_').replace(/^\/+|\/+$/g, '').replace(/\.\.+/g, '_') || 'source-lens';
-  const name = String(filename || 'source-lens/media');
-  return name.replace(/^source-lens\//, `${folder}/`);
+  const folder = String(p.folder || 'lets-pick').replace(/[\\:*?"<>|]+/g, '_').replace(/^\/+|\/+$/g, '').replace(/\.\.+/g, '_') || 'lets-pick';
+  const name = String(filename || 'lets-pick/media');
+  return name.replace(/^(?:source-lens|lets-pick)\//, `${folder}/`);
 }
 
 function crcTable() {
@@ -156,7 +156,7 @@ function zipStore(files) {
 }
 
 async function downloadBase64(mime, base64, filename) {
-  const name = await targetName(filename || 'source-lens/media');
+  const name = await targetName(filename || 'lets-pick/media');
   return new Promise(resolve => {
     chrome.downloads.download({
       url: `data:${mime};base64,${base64}`,
@@ -181,7 +181,7 @@ function watchDownload(id, timeout) {
     const check = item => {
       if (!item) return;
       if (item.state === 'interrupted' || item.error) finish({ ok: false, error: item.error || 'interrupted' });
-      else if (item.state === 'complete' || item.bytesReceived > 0) finish({ ok: true });
+      else if (item.state === 'complete') finish({ ok: true });
     };
     const onChanged = delta => {
       if (delta.id !== id) return;
@@ -387,14 +387,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const zip = zipStore(files);
         const b64 = toBase64(zip.buffer);
         if (b64.length < 6_000_000) {
-          const result = await downloadBase64('application/zip', b64, message.filename || 'source-lens/media.zip');
+          const result = await downloadBase64('application/zip', b64, message.filename || 'lets-pick/media.zip');
           sendResponse({ ok: result.ok, error: result.error, count: files.length });
           return;
         }
         const url = URL.createObjectURL(new Blob([zip], { type: 'application/zip' }));
         chrome.downloads.download({
           url,
-          filename: await targetName(message.filename || 'source-lens/media.zip'),
+          filename: await targetName(message.filename || 'lets-pick/media.zip'),
           saveAs: false,
           conflictAction: 'uniquify'
         }, () => {
@@ -409,7 +409,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === 'downloadUrl') {
     (async () => {
-      const filename = await targetName(message.filename || 'source-lens/media');
+      const filename = await targetName(message.filename || 'lets-pick/media');
       chrome.downloads.download({
         url: message.url,
         filename,
@@ -505,12 +505,12 @@ chrome.runtime.onInstalled.addListener(details => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: 'inspect-source',
-      title: 'Source Lens: 이 요소의 원본 주소 분석',
+      title: "Let's Pick: 이 요소의 원본 주소 분석",
       contexts: ['image', 'video', 'audio', 'link', 'page']
     });
     chrome.contextMenus.create({
       id: 'open-panel',
-      title: 'Source Lens: 이 페이지 미디어 모두 보기',
+      title: "Let's Pick: 이 페이지 미디어 모두 보기",
       contexts: ['image', 'video', 'audio', 'link', 'page', 'selection']
     });
   });

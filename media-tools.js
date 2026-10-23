@@ -1,4 +1,4 @@
-/* Source Lens media tools: HLS/DASH manifest parsing, MPEG-TS -> MP4 remux, fragmented MP4 demux,
+/* Let's Pick media tools: HLS/DASH manifest parsing, MPEG-TS -> MP4 remux, fragmented MP4 demux,
    and a plain MP4 writer that can merge separate video/audio tracks into one playable file.
    Pure JS, no remote code. Works in extension pages, content scripts and Node (for tests). */
 (function (root) {

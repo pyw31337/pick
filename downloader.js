@@ -1,4 +1,4 @@
-/* Source Lens downloader: fetches HLS / DASH streams, decrypts AES-128 (HLS clear-key only),
+/* Let's Pick downloader: fetches HLS / DASH streams, decrypts AES-128 (HLS clear-key only),
    merges video + audio into one MP4 and saves it. Never touches DRM-protected streams. */
 const api = globalThis.chrome;
 const MT = globalThis.SourceLensMedia;
@@ -23,8 +23,8 @@ class UserError extends Error {}
 async function prefsFolder() {
   try {
     const p = (await api.storage.local.get('slPrefs')).slPrefs || {};
-    return String(p.folder || 'source-lens').replace(/[\\:*?"<>|]+/g, '_').replace(/^\/+|\/+$/g, '').replace(/\.\.+/g, '_') || 'source-lens';
-  } catch { return 'source-lens'; }
+    return String(p.folder || 'lets-pick').replace(/[\\:*?"<>|]+/g, '_').replace(/^\/+|\/+$/g, '').replace(/\.\.+/g, '_') || 'lets-pick';
+  } catch { return 'lets-pick'; }
 }
 function slug(t) { return String(t || '').normalize('NFC').replace(/[^\p{L}\p{N}_-]+/gu, '_').replace(/_+/g, '_').replace(/^[_-]+|[_-]+$/g, '').slice(0, 40).replace(/[_-]+$/, ''); }
 function fileName(quality, ext) {
@@ -328,7 +328,7 @@ async function save(parts, label, ext, mime, note) {
   ui.status(`저장 완료 · ${fmtMB(blob.size)} · ${fileName(label, ext)}`, 'done');
   if (note) ui.detail(note);
   $('#show').hidden = false;
-  document.title = '✓ 저장 완료 · Source Lens';
+  document.title = '✓ 저장 완료 · Let\'s Pick';
   return { ok: true, size: blob.size };
 }
 
@@ -340,7 +340,7 @@ async function run() {
   $('#restart').hidden = true;
   $('#show').hidden = true;
   ui.bar(0);
-  document.title = '받는 중… · Source Lens';
+  document.title = '받는 중… · Let\'s Pick';
   try {
     const kind = job.kind === 'dash' || (job.url && /\.mpd(?:$|[?#])/i.test(job.url)) ? 'dash' : 'hls';
     $('#kind').textContent = kind === 'dash' ? 'DASH 스트림 → 하나의 MP4로 합쳐 저장' : 'HLS 스트림 → 하나의 MP4로 합쳐 저장';
@@ -351,7 +351,7 @@ async function run() {
     const msg = aborted ? '취소했습니다.' : e instanceof UserError ? e.message : `저장하지 못했습니다: ${e.message || e}`;
     ui.status(msg, aborted ? '' : 'error');
     if (!aborted && !(e instanceof UserError)) ui.detail('사이트가 주소를 만료시켰을 수 있습니다. 원래 페이지를 새로고침하고 영상을 다시 재생한 뒤 다시 시도하세요.');
-    document.title = aborted ? '취소됨 · Source Lens' : '실패 · Source Lens';
+    document.title = aborted ? '취소됨 · Let\'s Pick' : '실패 · Let\'s Pick';
     window.__slResult = { ok: false, error: msg };
   } finally {
     running = false;

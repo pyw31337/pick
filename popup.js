@@ -266,7 +266,7 @@ async function saveVideo(item, button) {
   if (item.kind === 'drm') { setStatus(item.note, 'error'); return { ok: false }; }
   if (item.kind === 'direct') {
     if (button) button.textContent = '확인 중…';
-    const res = await sendMessage({ type: 'downloadUrl', url: item.url, filename: `source-lens/${item.file || 'video.mp4'}` });
+    const res = await sendMessage({ type: 'downloadUrl', url: item.url, filename: `lets-pick/${item.file || 'video.mp4'}` });
     if (button) button.textContent = res.ok ? '저장됨 ✓' : '실패';
     setStatus(res.ok ? `원본 영상 저장을 시작했습니다 · ${item.file || ''}` : `원본 주소가 거절됐습니다 (${res.error || ''}). 페이지를 새로고침하거나 아래 다른 방법을 써 보세요.`, res.ok ? '' : 'error');
     return res;
@@ -329,9 +329,9 @@ async function saveItems(items) {
     if (item.stream) { skipped += 1; continue; }
     let res;
     if (item.type === 'svg' && item.code) {
-      res = await sendMessage({ type: 'downloadUrl', url: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(item.code)}`, filename: `source-lens/${item.file}` });
+      res = await sendMessage({ type: 'downloadUrl', url: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(item.code)}`, filename: `lets-pick/${item.file}` });
     } else {
-      res = await sendMessage({ type: 'downloadUrl', url: item.url, filename: `source-lens/${item.file}` });
+      res = await sendMessage({ type: 'downloadUrl', url: item.url, filename: `lets-pick/${item.file}` });
     }
     if (res.ok) ok += 1; else fail += 1;
     setStatus(`저장 중… ${ok + fail}/${items.length}`);
@@ -422,7 +422,7 @@ $('#zip').onclick = () => {
       code: x.type === 'svg' ? (x.code || '') : '',
       name: `${String(i + 1).padStart(2, '0')}-${x.file || 'media'}`
     })),
-    filename: `source-lens/${(state.host || 'page').replace(/^www\./, '')}-media.zip`
+    filename: `lets-pick/${(state.host || 'page').replace(/^www\./, '')}-media.zip`
   }, result => {
     void api.runtime.lastError;
     $('#zip').disabled = false;

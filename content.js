@@ -1340,7 +1340,7 @@
           MT.parseFragments(bytes, parsed);
           const tracks = MT.alignTracks(MT.fmp4ToTracks(parsed));
           if (tracks.length) blob = new Blob(MT.writeMp4(tracks), { type: 'video/mp4' });
-        } catch (e) { console.warn('[Source Lens] mp4 rewrite skipped', e); }
+        } catch (e) { console.warn("[Let's Pick] mp4 rewrite skipped", e); }
       }
       const name = VF.fileName({ title: VF.title(), quality: video.videoHeight ? `${Math.min(video.videoWidth, video.videoHeight)}p-녹화` : '녹화' }, ext);
       state.lastRecording = { ok: true, size: blob.size, mime: blob.type, name };
@@ -1451,7 +1451,7 @@
         type: 'downloadBase64',
         base64: bytesToBase64(buffer),
         mime: blob.type || 'application/octet-stream',
-        filename: `source-lens/${name}`
+        filename: `lets-pick/${name}`
       }, result => {
         const err = chrome.runtime.lastError?.message;
         done?.(!err && result?.ok !== false, err || result?.error);
@@ -1515,7 +1515,7 @@
     chrome.runtime.sendMessage({
       type: 'zipDownload',
       items: payload,
-      filename: `source-lens/${location.hostname.replace(/^www\./, '')}-media.zip`
+      filename: `lets-pick/${location.hostname.replace(/^www\./, '')}-media.zip`
     }, result => {
       if (result?.ok) {
         if (button) {
@@ -1556,7 +1556,7 @@
     const url = liveUrl(item);
     const locked = u => SL.SIGNED.test(u || '') || /cdninstagram|fbcdn\.net|scontent/i.test(u || '');
     if (/^https?:/i.test(url) && !item.temporary) {
-      chrome.runtime.sendMessage({ type: 'downloadUrl', url, filename: `source-lens/${name}` }, result => {
+      chrome.runtime.sendMessage({ type: 'downloadUrl', url, filename: `lets-pick/${name}` }, result => {
         void chrome.runtime.lastError;
         if (result?.ok) return finish(true);
         if (locked(url)) return finish(false, '서명·만료가 걸린 주소라 저장되지 않았습니다. 페이지를 새로고침한 뒤 다시 시도해 보세요.');
@@ -1656,10 +1656,20 @@
   }
 
   function imageBlob(item) {
-    return fetchBytes(item.url).catch(() => fetch(item.url, { credentials: 'include' }).then(r => {
-      if (!r.ok) throw new Error('fetch');
-      return r.blob();
-    }));
+    const urls = [...new Set([item.url, item.element?.currentSrc, item.element?.src].filter(url => /^(?:https?:|blob:)/i.test(url || '')))];
+    let attempt = Promise.reject(new Error('image URL unavailable'));
+    urls.forEach(url => {
+      attempt = attempt.catch(() => fetchBytes(url))
+        .catch(() => fetch(url, { credentials: 'omit', mode: 'cors' }).then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.blob();
+        }))
+        .catch(() => fetch(url, { credentials: 'include' }).then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.blob();
+        }));
+    });
+    return attempt;
   }
 
   function convertImage(item, format, button) {
@@ -1668,7 +1678,7 @@
     const name = `${(fileName(item.url) || 'image').replace(/\.[^.]+$/, '')}.${format.ext}`;
     const done = (ok, err) => {
       if (button) button.textContent = ok ? '저장됨' : '변환 실패';
-      if (!ok) console.warn('[Source Lens] convert', err);
+      if (!ok) console.warn("[Let's Pick] convert", err);
       setTimeout(() => { if (button) button.textContent = prev; }, 1800);
     };
     if (item.type === 'svg' && item.code) {
@@ -1697,7 +1707,7 @@
       type: 'convertAndDownload',
       url: item.url,
       mime: format.mime,
-      filename: `source-lens/${name}`
+      filename: `lets-pick/${name}`
     }, result => {
       if (chrome.runtime.lastError) return done(false, chrome.runtime.lastError.message);
       done(!!result?.ok, result?.error);
@@ -1968,7 +1978,7 @@
     const panel = document.createElement('section');
     panel.id = 'sl-panel';
     panel.setAttribute('role', 'dialog');
-    panel.setAttribute('aria-label', 'Source Lens');
+    panel.setAttribute('aria-label', "Let's Pick");
     if (state.dock === 'left') panel.classList.add('is-left');
     root.append(panel);
     state.panel = root;
@@ -1977,7 +1987,7 @@
       || { name: siteKind(), color: '#229968' };
     panel.innerHTML = `
       <header class="sl-topbar">
-        <h2>Source Lens <small class="sl-ver">${esc(VERSION)}</small></h2>
+        <h2>Let's Pick <small class="sl-ver">${esc(VERSION)}</small></h2>
         <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         <span class="sl-spacer"></span>
         <button class="sl-icon-btn sl-dock" type="button" title="패널을 반대쪽으로 옮기기">⇆</button>
@@ -2422,7 +2432,7 @@
             postUrl: state.postUrl,
             activeTab: state.activeTab
           }
-        }, location.origin);
+        }, '*');
       } catch {
         render();
       }
@@ -2530,7 +2540,7 @@
       state.redraw?.();
       return;
     }
-    if (ev.data.type !== 'open' || ev.origin !== location.origin) return;
+    if (ev.data.type !== 'open' || ev.source === window) return;
     state.candidates = ev.data.data?.candidates || [];
     state.picked = ev.data.data?.picked || state.candidates[0] || null;
     state.postUrl = ev.data.data?.postUrl || '';

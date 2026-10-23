@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Source Lens",
-  "version": "1.1.0",
-  "description": "페이지의 이미지·영상·SVG 원본을 찾아 저장합니다. 인스타·페북 원본 영상, HLS/DASH 스트림 합치기, 유튜브 녹화 저장 지원.",
+  "name": "Let's Pick",
+  "short_name": "Let's Pick",
+  "version": "1.1.1",
+  "description": "페이지의 이미지·영상·SVG 원본을 찾아 저장합니다. 인스타·페북 원본 영상, HLS/DASH 스트림 합치기, 유튜브 녹화 저장을 지원하는 Let's Pick.",
   "permissions": [
     "contextMenus",
     "webRequest",
@@ -21,7 +22,7 @@
     ]
   },
   "action": {
-    "default_title": "Source Lens — 이미지·영상·SVG 원본 찾기",
+    "default_title": "Let's Pick — 이미지·영상·SVG 원본 찾기",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icon-16.png",
@@ -36,6 +37,8 @@
       "js": ["inject-main.js"],
       "run_at": "document_start",
       "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true,
       "world": "MAIN"
     },
     {
@@ -43,13 +46,17 @@
       "js": ["shared.js", "platform-profiles.js", "extractors.js"],
       "run_at": "document_idle",
       "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true,
       "world": "MAIN"
     },
     {
       "matches": ["http://*/*", "https://*/*"],
       "js": ["shared.js", "platform-profiles.js", "media-tools.js", "video-finder.js", "content.js"],
       "run_at": "document_start",
-      "all_frames": true
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
     }
   ],
   "web_accessible_resources": [

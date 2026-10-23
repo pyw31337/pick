@@ -1,4 +1,4 @@
-/* Source Lens — video finder (isolated content-script world).
+/* Let's Pick — video finder (isolated content-script world).
    Turns everything we know about the page's videos into a ranked list of saveable items:
    kind = direct (a real file), dash / hls (stream we can download + merge), record (only by recording), drm (protected). */
 (() => {
@@ -178,7 +178,7 @@
     const paths = loadedPaths();
     const pageTitle = title();
 
-    const safe = (name, fn) => { try { fn(); } catch (e) { console.warn('[Source Lens] video section failed:', name, e); } };
+    const safe = (name, fn) => { try { fn(); } catch (e) { console.warn("[Let's Pick] video section failed:", name, e); } };
     // 1) Platform JSON groups (Instagram / Facebook / JSON-LD)
     safe('groups', () => {
     const groups = (st.groups || []).filter(g => g.progressive?.length || g.mpd || g.mpdUrl || g.hls);
@@ -365,7 +365,7 @@
     return rec || drm || null;
   };
 
-  /** Starts a stream download job (opens the Source Lens downloader tab). */
+  /** Starts a stream download job (opens the Let's Pick downloader tab). */
   V.startJob = (item, preferHeight) => new Promise(resolve => {
     const job = { ...item.job, quality: preferHeight || 0, file: item.file, title: item.title || title(), host: host() };
     chrome.runtime.sendMessage({ type: 'mediaJob', job }, res => {
@@ -375,7 +375,7 @@
   });
 
   V.downloadDirect = item => new Promise(resolve => {
-    chrome.runtime.sendMessage({ type: 'downloadUrl', url: item.url, filename: `source-lens/${item.file || V.fileName(item, item.ext)}` }, res => {
+    chrome.runtime.sendMessage({ type: 'downloadUrl', url: item.url, filename: `lets-pick/${item.file || V.fileName(item, item.ext)}` }, res => {
       const err = chrome.runtime.lastError?.message;
       resolve(err ? { ok: false, error: err } : (res || { ok: true }));
     });
