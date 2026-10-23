@@ -127,6 +127,21 @@
     const all = deepAll('*');
     const limit = Math.min(all.length, 9000);
     const maps = { colors: new Map(), gradients: new Map(), typography: new Map(), spacing: new Map(), radii: new Map(), shadows: new Map() };
+    const components = new Map();
+    const parseColor = value => {
+      const v = String(value || '').trim().toLowerCase();
+      const hex = v.match(/^#([0-9a-f]{3,8})$/i);
+      if (hex) {
+        let h = hex[1]; if (h.length === 3 || h.length === 4) h = h.split('').map(c => c + c).join('');
+        if (h.length >= 6) return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16), h.length >= 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1];
+      }
+      const rgb = v.match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?\s*\)$/i);
+      return rgb ? [Number(rgb[1]), Number(rgb[2]), Number(rgb[3]), rgb[4] == null ? 1 : Number(rgb[4]) > 1 ? Number(rgb[4]) / 255 : Number(rgb[4])] : null;
+    };
+    const contrastRatio = (a, b) => {
+      const lum = color => { const channels = color.slice(0, 3).map(c => { const n = c / 255; return n <= .03928 ? n / 12.92 : ((n + .055) / 1.055) ** 2.4; }); return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2]; };
+      const l1 = lum(a), l2 = lum(b); return (Math.max(l1, l2) + .05) / (Math.min(l1, l2) + .05);
+    };
     const add = (map, value, extra = {}) => {
       const v = String(value || '').trim();
       if (!v || v === 'none' || v === 'normal' || v === 'transparent' || /^rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)$/i.test(v)) return;
@@ -136,7 +151,7 @@
       map.set(key, row);
     };
     const colorRegex = /(?:rgba?|hsla?|#[0-9a-f]{3,8})/ig;
-    let inspected = 0;
+    let inspected = 0, contrastChecks = 0, contrastFails = 0;
     for (let i = 0; i < limit; i += 1) {
       const el = all[i];
       if (!el || el.id === 'sl-host' || el.closest?.('#sl-host')) continue;
@@ -154,6 +169,20 @@
       [style.marginTop, style.marginRight, style.marginBottom, style.marginLeft, style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft, style.gap, style.rowGap, style.columnGap].forEach(value => add(maps.spacing, value));
       add(maps.radii, style.borderRadius);
       add(maps.shadows, style.boxShadow);
+      if (el.matches?.('button, a, [role="button"], input[type="button"], input[type="submit"]')) {
+        const key = [style.borderRadius, style.fontSize, style.fontWeight, style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft].join('|');
+        const row = components.get(key) || { radius: style.borderRadius, size: style.fontSize, weight: style.fontWeight, padding: `${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft}`, count: 0 };
+        row.count += 1; components.set(key, row);
+      }
+      const text = (el.textContent || '').trim();
+      const rect = el.getBoundingClientRect?.();
+      const fg = parseColor(style.color), bgColor = parseColor(style.backgroundColor);
+      if (text && rect?.width > 2 && rect?.height > 2 && fg && bgColor && bgColor[3] > .9) {
+        contrastChecks += 1;
+        const ratio = contrastRatio(fg, bgColor);
+        const large = parseFloat(style.fontSize) >= 18 || (parseFloat(style.fontSize) >= 14 && Number(style.fontWeight) >= 700);
+        if (ratio < (large ? 3 : 4.5)) contrastFails += 1;
+      }
     }
     const list = (map, max = 32) => [...map.values()].sort((a, b) => b.count - a.count || a.value.localeCompare(b.value)).slice(0, max);
     const colors = list(maps.colors).map((row, index) => ({ ...row, rank: index + 1 }));
@@ -162,6 +191,15 @@
     const spacing = list(maps.spacing, 24);
     const radii = list(maps.radii, 16);
     const shadows = list(maps.shadows, 16);
+    const componentStyles = [...components.values()].sort((a, b) => b.count - a.count).slice(0, 12);
+    const frameworkChecks = [
+      ['React', !!globalThis.React || /react(?:\.production)?(?:\.min)?\.js/i.test([...document.scripts].map(s => s.src).join(' '))],
+      ['Vue', !!globalThis.Vue || /vue(?:\.global)?(?:\.runtime)?(?:\.min)?\.js/i.test([...document.scripts].map(s => s.src).join(' '))],
+      ['Angular', !!globalThis.ng || [...document.querySelectorAll('[ng-version]')].length > 0],
+      ['Svelte', [...document.querySelectorAll('[class*="svelte-"]')].length > 0],
+      ['Tailwind', [...document.querySelectorAll('[class*="bg-"]')].length > 4 && [...document.querySelectorAll('[class*="text-"]')].length > 4]
+    ];
+    const frameworks = frameworkChecks.filter(row => row[1]).map(row => row[0]);
     const uniqueColors = maps.colors.size;
     const uniqueTypes = maps.typography.size;
     const repeatedColors = colors.filter(row => row.count >= 3).length;
@@ -171,7 +209,9 @@
     if (uniqueTypes > 18) issues.push({ level: 'warn', title: '타이포그래피 계층이 복잡합니다', detail: `${uniqueTypes}개의 서체 조합이 감지되었습니다.` });
     if (!gradients.length) issues.push({ level: 'info', title: '그라디언트가 감지되지 않았습니다', detail: '단색 중심의 페이지입니다.' });
     if (!shadows.length) issues.push({ level: 'info', title: '그림자가 감지되지 않았습니다', detail: '평면형 표면 스타일을 사용하고 있습니다.' });
-    const consistency = Math.max(0, Math.min(100, 100 - Math.min(48, Math.max(0, uniqueColors - 8) * 2) - Math.min(28, Math.max(0, uniqueTypes - 6) * 2) + Math.min(12, repeatedColors) + Math.min(8, repeatedTypes)));
+    if (contrastFails) issues.push({ level: 'warn', title: '대비가 낮은 텍스트가 있습니다', detail: `${contrastChecks}개 텍스트 조합 중 ${contrastFails}개가 WCAG AA 기준보다 낮습니다.` });
+    if (componentStyles.length > 5 && componentStyles[0].count > componentStyles[1]?.count * 4) issues.push({ level: 'info', title: '컴포넌트 스타일 편차가 큽니다', detail: '버튼·링크 계열의 반복 스타일이 여러 조합으로 나뉘어 있습니다.' });
+    const consistency = Math.max(0, Math.min(100, 100 - Math.min(48, Math.max(0, uniqueColors - 8) * 2) - Math.min(28, Math.max(0, uniqueTypes - 6) * 2) - Math.min(18, contrastFails) + Math.min(12, repeatedColors) + Math.min(8, repeatedTypes)));
     const css = [
       ':root {',
       ...colors.slice(0, 12).map((row, i) => `  --lp-color-${i + 1}: ${row.value};`),
@@ -180,7 +220,7 @@
       ...spacing.slice(0, 8).map((row, i) => `  --lp-space-${i + 1}: ${row.value};`),
       '}'
     ].join('\n');
-    const tokens = { colors, gradients, typography, spacing, radii, shadows, inspected, score: consistency, issues };
+    const tokens = { colors, gradients, typography, spacing, radii, shadows, components: componentStyles, frameworks, contrast: { checks: contrastChecks, failures: contrastFails }, inspected, score: consistency, issues };
     const tailwind = `/** Let's Pick design tokens */\nexport default {\n  theme: { extend: {\n    colors: ${JSON.stringify(Object.fromEntries(colors.slice(0, 12).map((row, i) => [`lp-${i + 1}`, row.value])), null, 2)},\n    borderRadius: ${JSON.stringify(Object.fromEntries(radii.slice(0, 6).map((row, i) => [`lp-${i + 1}`, row.value])), null, 2)}\n  }}\n}`;
     return { ...tokens, css, tailwind, json: JSON.stringify(tokens, null, 2) };
   }
@@ -2711,6 +2751,10 @@
         const item = document.createElement('div'); item.className = 'sl-design-stat'; item.innerHTML = `<span>${iconSvg(key === 'colors' ? 'palette' : key === 'typography' ? 'text' : key === 'shadows' ? 'shadow' : 'audit')}</span><b>${esc(String(data[key]?.length || 0))}</b><small>${esc(label)}</small>`; summary.append(item);
       });
       main.append(summary);
+      const context = document.createElement('div');
+      context.className = 'sl-design-context';
+      context.innerHTML = `<span>${iconSvg('terminal')}<b>감지 스택</b> ${esc((data.frameworks || []).join(' · ') || '프레임워크 신호 없음')}</span><span>${iconSvg('audit')}<b>대비</b> ${esc(`${data.contrast?.failures || 0}건 이슈 / ${data.contrast?.checks || 0}건 검사`)}</span>`;
+      main.append(context);
       const section = (title, icon, rows, renderRow) => {
         const box = document.createElement('section'); box.className = 'sl-token-section';
         const h = document.createElement('h3'); h.innerHTML = `${iconSvg(icon)}<span>${esc(title)}</span><small>${rows?.length || 0}</small>`; box.append(h);
@@ -2721,6 +2765,7 @@
       section('주요 색상', 'palette', data.colors, row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<i class="sl-color-dot"></i><code>${esc(row.value)}</code><span>${esc(String(row.count))}회</span>`; el.querySelector('.sl-color-dot').style.background = row.value; return el; });
       section('타이포그래피', 'text', data.typography, row => { const el = document.createElement('div'); el.className = 'sl-token-row sl-type-row'; el.innerHTML = `<strong>Aa</strong><div><code>${esc(row.family)}</code><small>${esc(row.size)} · ${esc(row.weight)} · 행간 ${esc(row.lineHeight)}</small></div><span>${esc(String(row.count))}회</span>`; el.querySelector('strong').style.fontFamily = row.family; el.querySelector('strong').style.fontSize = row.size; return el; });
       section('그라디언트', 'gradient', data.gradients, row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<i class="sl-gradient-swatch"></i><code>${esc(row.value)}</code><span>${esc(String(row.count))}회</span>`; el.querySelector('.sl-gradient-swatch').style.backgroundImage = row.value; return el; });
+      section('컴포넌트 스타일', 'audit', data.components, row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<code>radius ${esc(row.radius)} · ${esc(row.size)} · ${esc(row.weight)}</code><span>${esc(String(row.count))}개</span>`; return el; });
       section('간격·모서리·그림자', 'audit', [...(data.spacing || []).slice(0, 4), ...(data.radii || []).slice(0, 4), ...(data.shadows || []).slice(0, 4)], row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<code>${esc(row.value)}</code><span>${esc(String(row.count))}회</span>`; return el; });
       const issues = document.createElement('section'); issues.className = 'sl-token-section sl-audit-issues'; const ih = document.createElement('h3'); ih.innerHTML = `${iconSvg('audit')}<span>감사 메모</span><small>${data.issues?.length || 0}</small>`; issues.append(ih); (data.issues || []).forEach(row => { const el = document.createElement('div'); el.className = `sl-audit-item is-${row.level}`; el.innerHTML = `<b>${esc(row.title)}</b><p>${esc(row.detail)}</p>`; issues.append(el); }); main.append(issues);
     };
