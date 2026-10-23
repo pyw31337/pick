@@ -11,7 +11,7 @@
   const MT = globalThis.SourceLensMedia;
   const state = {
     panel: null, selected: null, contextTarget: null, selectedMedia: null, picked: null, analysis: null,
-    candidates: [], activeTab: 'selected', postUrl: '', capture: null, pageNet: [],
+    candidates: [], activeTab: 'selected', postUrl: '', capture: null, pageNet: [], design: null,
     profile: null, observer: null, scanTimer: 0, redraw: null, platformMedia: [],
     recorder: null, captureTimer: 0, videoItems: [],
     query: '', minPx: 0, sort: 'big', selectedKeys: new Set(), dock: 'right', altClick: true,
@@ -118,6 +118,71 @@
     }
     bgCache = { t: now, items: out };
     return out;
+  }
+
+  // A page-level design pass inspired by the useful, public-facing part of
+  // Peek's design audit: read the rendered system, not framework internals.
+  // Keep this deliberately bounded so large feeds remain responsive.
+  function analyzeDesignSystem() {
+    const all = deepAll('*');
+    const limit = Math.min(all.length, 9000);
+    const maps = { colors: new Map(), gradients: new Map(), typography: new Map(), spacing: new Map(), radii: new Map(), shadows: new Map() };
+    const add = (map, value, extra = {}) => {
+      const v = String(value || '').trim();
+      if (!v || v === 'none' || v === 'normal' || v === 'transparent' || /^rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)$/i.test(v)) return;
+      const key = v.toLowerCase();
+      const row = map.get(key) || { value: v, count: 0, ...extra };
+      row.count += 1;
+      map.set(key, row);
+    };
+    const colorRegex = /(?:rgba?|hsla?|#[0-9a-f]{3,8})/ig;
+    let inspected = 0;
+    for (let i = 0; i < limit; i += 1) {
+      const el = all[i];
+      if (!el || el.id === 'sl-host' || el.closest?.('#sl-host')) continue;
+      let style;
+      try { style = getComputedStyle(el); } catch { continue; }
+      inspected += 1;
+      add(maps.colors, style.color, { kind: 'text' });
+      add(maps.colors, style.backgroundColor, { kind: 'surface' });
+      ['borderTopColor', 'borderRightColor', 'borderBottomColor', 'borderLeftColor', 'outlineColor'].forEach(prop => add(maps.colors, style[prop], { kind: 'border' }));
+      const bg = style.backgroundImage || '';
+      if (/gradient\(/i.test(bg)) add(maps.gradients, bg);
+      (bg.match(colorRegex) || []).forEach(value => add(maps.colors, value, { kind: 'gradient' }));
+      const type = [style.fontFamily, style.fontSize, style.fontWeight, style.lineHeight, style.letterSpacing].join('|');
+      if (type && style.fontFamily) add(maps.typography, type, { family: style.fontFamily, size: style.fontSize, weight: style.fontWeight, lineHeight: style.lineHeight, letterSpacing: style.letterSpacing });
+      [style.marginTop, style.marginRight, style.marginBottom, style.marginLeft, style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft, style.gap, style.rowGap, style.columnGap].forEach(value => add(maps.spacing, value));
+      add(maps.radii, style.borderRadius);
+      add(maps.shadows, style.boxShadow);
+    }
+    const list = (map, max = 32) => [...map.values()].sort((a, b) => b.count - a.count || a.value.localeCompare(b.value)).slice(0, max);
+    const colors = list(maps.colors).map((row, index) => ({ ...row, rank: index + 1 }));
+    const gradients = list(maps.gradients, 16);
+    const typography = list(maps.typography, 20);
+    const spacing = list(maps.spacing, 24);
+    const radii = list(maps.radii, 16);
+    const shadows = list(maps.shadows, 16);
+    const uniqueColors = maps.colors.size;
+    const uniqueTypes = maps.typography.size;
+    const repeatedColors = colors.filter(row => row.count >= 3).length;
+    const repeatedTypes = typography.filter(row => row.count >= 3).length;
+    const issues = [];
+    if (uniqueColors > 24) issues.push({ level: 'warn', title: '색상 토큰이 분산되어 있습니다', detail: `${uniqueColors}개의 색상이 감지되었습니다. 상위 색상을 토큰으로 정리하면 일관성이 좋아집니다.` });
+    if (uniqueTypes > 18) issues.push({ level: 'warn', title: '타이포그래피 계층이 복잡합니다', detail: `${uniqueTypes}개의 서체 조합이 감지되었습니다.` });
+    if (!gradients.length) issues.push({ level: 'info', title: '그라디언트가 감지되지 않았습니다', detail: '단색 중심의 페이지입니다.' });
+    if (!shadows.length) issues.push({ level: 'info', title: '그림자가 감지되지 않았습니다', detail: '평면형 표면 스타일을 사용하고 있습니다.' });
+    const consistency = Math.max(0, Math.min(100, 100 - Math.min(48, Math.max(0, uniqueColors - 8) * 2) - Math.min(28, Math.max(0, uniqueTypes - 6) * 2) + Math.min(12, repeatedColors) + Math.min(8, repeatedTypes)));
+    const css = [
+      ':root {',
+      ...colors.slice(0, 12).map((row, i) => `  --lp-color-${i + 1}: ${row.value};`),
+      ...typography.slice(0, 8).map((row, i) => `  --lp-type-${i + 1}: ${row.size} ${row.family};`),
+      ...radii.slice(0, 6).map((row, i) => `  --lp-radius-${i + 1}: ${row.value};`),
+      ...spacing.slice(0, 8).map((row, i) => `  --lp-space-${i + 1}: ${row.value};`),
+      '}'
+    ].join('\n');
+    const tokens = { colors, gradients, typography, spacing, radii, shadows, inspected, score: consistency, issues };
+    const tailwind = `/** Let's Pick design tokens */\nexport default {\n  theme: { extend: {\n    colors: ${JSON.stringify(Object.fromEntries(colors.slice(0, 12).map((row, i) => [`lp-${i + 1}`, row.value])), null, 2)},\n    borderRadius: ${JSON.stringify(Object.fromEntries(radii.slice(0, 6).map((row, i) => [`lp-${i + 1}`, row.value])), null, 2)}\n  }}\n}`;
+    return { ...tokens, css, tailwind, json: JSON.stringify(tokens, null, 2) };
   }
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -1039,6 +1104,7 @@
       videos,
       svgs: all.filter(i => i.type === 'svg'),
       fonts: all.filter(i => i.type === 'font'),
+      design: analyzeDesignSystem(),
       host: location.hostname,
       title: document.title,
       top: window === window.top,
@@ -1100,6 +1166,7 @@
     state.panel = null;
     state.lightboxItem = null;
     state.analysis = null;
+    state.design = null;
     state.selected?.classList?.remove('sl-select');
   }
 
@@ -1495,6 +1562,10 @@
     plus: '<path d="M14 2h4v12h12v4H18v12h-4V18H2v-4h12V2Z"/>',
     minus: '<path d="M2 14h28v4H2v-4Z"/>',
     trash: '<path d="M5 8h22v4H5V8Zm5-5h12l2 5H8l2-5Zm-2 9h16l-1 17H9L8 12Zm5 4v10h3V16h-3Zm6 0v10h3V16h-3Z"/>'
+    ,audit: '<path d="M5 4h22v24H5V4Zm5 5h12v3H10V9Zm0 6h8v3h-8v-3Zm0 6h12v3H10v-3Z"/><path d="m22 16 2 2 4-5 2 2-6 7-4-4 2-2Z" fill="#3ecf8e"/>',
+    palette: '<path d="M16 3a13 13 0 0 0 0 26h2a3 3 0 0 0 0-6h-2a2 2 0 0 1 0-4h4a9 9 0 0 0 0-16H16Zm-6 8a2 2 0 1 1 0-4 2 2 0 0 1 0 4Zm5-3a2 2 0 1 1 0-4 2 2 0 0 1 0 4Zm6 3a2 2 0 1 1 0-4 2 2 0 0 1 0 4Z"/>',
+    gradient: '<path d="M4 5h24v22H4V5Zm4 4v14h16V9H8Z"/><path d="M8 23 24 9v14H8Z" fill="#3ecf8e"/>',
+    shadow: '<path d="M7 5h18v16H7V5Zm4 4v8h10V9H11Z"/><path d="M9 24h14v3H9v-3Z" opacity=".55"/>'
   };
 
   function iconSvg(name) {
@@ -2420,7 +2491,7 @@
 
   function visibleList() {
     const tab = state.activeTab;
-    if (tab === 'selected') {
+    if (tab === 'selected' || tab === 'design') {
       const picked = state.picked || state.candidates[0];
       return picked ? [picked] : [];
     }
@@ -2457,8 +2528,10 @@
     // analysis payload while tearing down the previous DOM; otherwise
     // closePanel() would erase it before drawSelected() can render the CSS card.
     const analysis = state.analysis;
+    const design = state.design;
     closePanel();
     state.analysis = analysis;
+    state.design = design;
     refreshVideoItems();
     const shadow = uiRoot();
     const root = document.createElement('div');
@@ -2487,6 +2560,7 @@
         <button data-tab="video" title="단축키 3">${iconSvg('video')}<span class="sl-tab-label">영상</span> <b>0</b></button>
         <button data-tab="svg" title="단축키 4">${iconSvg('code')}<span class="sl-tab-label">SVG</span> <b>0</b></button>
         <button data-tab="font" title="단축키 5">${iconSvg('text')}<span class="sl-tab-label">글꼴</span> <b>0</b></button>
+        <button data-tab="design" title="단축키 6">${iconSvg('audit')}<span class="sl-tab-label">디자인</span></button>
       </nav>
       <div class="sl-tools"></div>
       <main class="sl-main"></main>
@@ -2617,6 +2691,40 @@
       updateBulk();
     };
 
+    const renderDesign = () => {
+      main.textContent = '';
+      const data = state.design || analyzeDesignSystem();
+      state.design = data;
+      const head = document.createElement('section');
+      head.className = 'sl-design-head';
+      head.innerHTML = `<div><div class="sl-kicker">DESIGN AUDIT · ${esc(String(data.inspected || 0))}개 요소</div><strong>페이지 디자인 시스템</strong><p>렌더링된 CSS에서 반복되는 토큰과 일관성 신호를 추출했습니다.</p></div><div class="sl-design-score"><b>${esc(String(data.score || 0))}</b><span>/100</span><small>일관성</small></div>`;
+      main.append(head);
+      const actions = document.createElement('div');
+      actions.className = 'sl-design-actions';
+      actions.append(actionButton('primary', 'CSS 토큰 복사', () => copy(data.css), 'code'));
+      actions.append(actionButton('normal', 'JSON 저장', () => downloadBlob(new Blob([data.json], { type: 'application/json' }), `${location.hostname.replace(/^www\\./, '')}-design-tokens.json`), 'save'));
+      actions.append(actionButton('normal', 'Tailwind 복사', () => copy(data.tailwind), 'code'));
+      main.append(actions);
+      const summary = document.createElement('div');
+      summary.className = 'sl-design-summary';
+      [['colors', '색상'], ['gradients', '그라디언트'], ['typography', '서체'], ['spacing', '간격'], ['radii', '모서리'], ['shadows', '그림자']].forEach(([key, label]) => {
+        const item = document.createElement('div'); item.className = 'sl-design-stat'; item.innerHTML = `<span>${iconSvg(key === 'colors' ? 'palette' : key === 'typography' ? 'text' : key === 'shadows' ? 'shadow' : 'audit')}</span><b>${esc(String(data[key]?.length || 0))}</b><small>${esc(label)}</small>`; summary.append(item);
+      });
+      main.append(summary);
+      const section = (title, icon, rows, renderRow) => {
+        const box = document.createElement('section'); box.className = 'sl-token-section';
+        const h = document.createElement('h3'); h.innerHTML = `${iconSvg(icon)}<span>${esc(title)}</span><small>${rows?.length || 0}</small>`; box.append(h);
+        if (!rows?.length) { const empty = document.createElement('p'); empty.className = 'sl-token-empty'; empty.textContent = '감지된 토큰이 없습니다.'; box.append(empty); }
+        else rows.slice(0, 12).forEach(row => box.append(renderRow(row)));
+        main.append(box);
+      };
+      section('주요 색상', 'palette', data.colors, row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<i class="sl-color-dot"></i><code>${esc(row.value)}</code><span>${esc(String(row.count))}회</span>`; el.querySelector('.sl-color-dot').style.background = row.value; return el; });
+      section('타이포그래피', 'text', data.typography, row => { const el = document.createElement('div'); el.className = 'sl-token-row sl-type-row'; el.innerHTML = `<strong>Aa</strong><div><code>${esc(row.family)}</code><small>${esc(row.size)} · ${esc(row.weight)} · 행간 ${esc(row.lineHeight)}</small></div><span>${esc(String(row.count))}회</span>`; el.querySelector('strong').style.fontFamily = row.family; el.querySelector('strong').style.fontSize = row.size; return el; });
+      section('그라디언트', 'gradient', data.gradients, row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<i class="sl-gradient-swatch"></i><code>${esc(row.value)}</code><span>${esc(String(row.count))}회</span>`; el.querySelector('.sl-gradient-swatch').style.backgroundImage = row.value; return el; });
+      section('간격·모서리·그림자', 'audit', [...(data.spacing || []).slice(0, 4), ...(data.radii || []).slice(0, 4), ...(data.shadows || []).slice(0, 4)], row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<code>${esc(row.value)}</code><span>${esc(String(row.count))}회</span>`; return el; });
+      const issues = document.createElement('section'); issues.className = 'sl-token-section sl-audit-issues'; const ih = document.createElement('h3'); ih.innerHTML = `${iconSvg('audit')}<span>감사 메모</span><small>${data.issues?.length || 0}</small>`; issues.append(ih); (data.issues || []).forEach(row => { const el = document.createElement('div'); el.className = `sl-audit-item is-${row.level}`; el.innerHTML = `<b>${esc(row.title)}</b><p>${esc(row.detail)}</p>`; issues.append(el); }); main.append(issues);
+    };
+
     state.updateVideoTab = () => {
       updateCounts();
       if (state.activeTab === 'video') renderGrid();
@@ -2624,7 +2732,7 @@
 
     const drawTools = () => {
       tools.textContent = '';
-      if (state.activeTab === 'selected') { tools.hidden = true; return; }
+      if (state.activeTab === 'selected' || state.activeTab === 'design') { tools.hidden = true; return; }
       tools.hidden = false;
       const row = document.createElement('div');
       row.className = 'sl-filter-row';
@@ -2802,7 +2910,8 @@
         });
         updateCounts();
         drawTools();
-        if (state.activeTab === 'selected') drawSelected();
+      if (state.activeTab === 'selected') drawSelected();
+        else if (state.activeTab === 'design') renderDesign();
         else renderGrid();
       } catch (error) {
         const box = document.createElement('div');
@@ -2850,6 +2959,7 @@
     const images = state.candidates.filter(i => i.type === 'image');
     state.picked = images.slice().sort((a, b) => itemPixel(b) - itemPixel(a))[0] || state.candidates[0] || null;
     const count = type => state.candidates.filter(i => i.type === type).length;
+    state.design = analyzeDesignSystem();
     state.activeTab = preferTab || (count('image') ? 'image' : count('video') ? 'video' : count('svg') ? 'svg' : count('font') ? 'font' : 'image');
     state.selectedKeys.clear();
     render();
@@ -2874,6 +2984,7 @@
     await new Promise(resolve => setTimeout(resolve, 80));
 
     const analysis = analyzeTarget(target);
+    state.design = analyzeDesignSystem();
     const collected = collectTarget(target);
     state.selected = target;
     state.analysis = analysis;
@@ -2935,6 +3046,7 @@
             candidates: state.candidates.map(({ element, ...item }) => item),
             picked: state.picked ? (({ element, ...item }) => item)(state.picked) : null,
             analysis: plainAnalysis(state.analysis),
+            design: state.design,
             postUrl: state.postUrl,
             activeTab: state.activeTab
           }
@@ -3051,6 +3163,7 @@
     state.candidates = ev.data.data?.candidates || [];
     state.picked = ev.data.data?.picked || state.candidates[0] || null;
     state.analysis = ev.data.data?.analysis || null;
+    state.design = ev.data.data?.design || null;
     state.postUrl = ev.data.data?.postUrl || '';
     state.activeTab = ev.data.data?.activeTab || 'selected';
     render();
@@ -3131,7 +3244,7 @@
       return;
     }
     if (!state.panel) return;
-    const tabs = { 1: 'selected', 2: 'image', 3: 'video', 4: 'svg', 5: 'font' };
+    const tabs = { 1: 'selected', 2: 'image', 3: 'video', 4: 'svg', 5: 'font', 6: 'design' };
     if (!box && tabs[ev.key]) { state.switchTab?.(tabs[ev.key]); ev.stopPropagation(); return; }
     if (!box && ev.key === '/') { ev.preventDefault(); ev.stopPropagation(); state.focusSearch?.(); return; }
     const current = state.lightboxItem || state.picked;

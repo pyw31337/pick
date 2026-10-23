@@ -12,7 +12,7 @@ button{font:inherit;cursor:pointer}
 button:disabled{opacity:.45;cursor:default}
 .icon{width:30px;height:30px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg);font-size:15px;line-height:1;display:inline-flex;align-items:center;justify-content:center}
 .icon:hover{background:var(--overlay)}
-.primary{display:grid;grid-template-columns:1fr auto auto;gap:8px;margin-bottom:10px}
+.primary{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
 .primary button,footer button{min-height:36px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg);font-weight:650;padding:0 12px}
 .primary button:hover:not(:disabled),footer button:hover:not(:disabled){background:var(--overlay)}
 button.brand{background:var(--brand)!important;border-color:var(--brand)!important;color:#111!important}

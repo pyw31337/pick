@@ -447,11 +447,11 @@ async function load() {
     state.data = { images: [], videos: [], svgs: [], fonts: [] };
     render();
     $('#list').innerHTML = '<p class="empty">이 페이지(브라우저 설정·새 탭·웹스토어 등)는 보안상 확장 프로그램이 분석할 수 없습니다. 일반 웹사이트에서 열어 주세요.</p>';
-    ['#openPanel', '#oneClickVideo'].forEach(sel => { $(sel).disabled = true; });
+    ['#openPanel', '#oneClickVideo', '#designAudit'].forEach(sel => { $(sel).disabled = true; });
     $('#count').textContent = '';
     return;
   }
-  ['#openPanel', '#oneClickVideo'].forEach(sel => { $(sel).disabled = false; });
+  ['#openPanel', '#oneClickVideo', '#designAudit'].forEach(sel => { $(sel).disabled = false; });
   try {
     const data = await collect(tab);
     state.data = data;
@@ -569,6 +569,17 @@ $('#openPanel').onclick = async () => {
   if (!tab) return;
   const tabName = { images: 'image', videos: 'video', svgs: 'svg', fonts: 'font' }[state.view];
   api.tabs.sendMessage(tab.id, { type: 'openPanel', tab: tabName }, { frameId: 0 }, () => {
+    if (api.runtime.lastError) {
+      setStatus('페이지에 연결하지 못했습니다. 페이지를 새로고침한 뒤 다시 눌러 주세요.', 'error');
+      return;
+    }
+    window.close();
+  });
+};
+$('#designAudit').onclick = async () => {
+  const tab = state.tab || await activeTab();
+  if (!tab) return;
+  api.tabs.sendMessage(tab.id, { type: 'openPanel', tab: 'design' }, { frameId: 0 }, () => {
     if (api.runtime.lastError) {
       setStatus('페이지에 연결하지 못했습니다. 페이지를 새로고침한 뒤 다시 눌러 주세요.', 'error');
       return;
