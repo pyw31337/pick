@@ -11,7 +11,7 @@
   const MT = globalThis.SourceLensMedia;
   const state = {
     panel: null, selected: null, contextTarget: null, selectedMedia: null, picked: null, analysis: null,
-    candidates: [], activeTab: 'selected', postUrl: '', capture: null, pageNet: [], design: null,
+    candidates: [], activeTab: 'selected', designSubtab: 'overview', postUrl: '', capture: null, pageNet: [], design: null,
     profile: null, observer: null, scanTimer: 0, redraw: null, platformMedia: [],
     recorder: null, captureTimer: 0, videoItems: [],
     query: '', minPx: 0, sort: 'big', selectedKeys: new Set(), dock: 'right', altClick: true,
@@ -1533,7 +1533,7 @@
     if (item.type === 'font') {
       const holder = document.createElement('div');
       holder.className = `sl-font-media ${className || ''}`;
-      holder.innerHTML = `<strong>Aa</strong><span>${esc(item.family || item.format || SL.extOf(item.url, 'font'))}</span>`;
+      holder.innerHTML = `<strong>가나다 ABCD</strong><span>다람쥐 헌 쳇바퀴 · The quick brown fox</span><small>${esc(item.family || item.format || SL.extOf(item.url, 'font'))}</small>`;
       return holder;
     }
     if (item.type === 'svg' || /\.svg(?:$|[?#])/i.test(item.url || '') || /^data:image\/svg/i.test(item.url || '')) {
@@ -2541,9 +2541,20 @@
 
   function visibleList() {
     const tab = state.activeTab;
-    if (tab === 'selected' || tab === 'design') {
+    if (tab === 'selected') {
       const picked = state.picked || state.candidates[0];
       return picked ? [picked] : [];
+    }
+    if (tab === 'design') {
+      if (state.designSubtab === 'font' || state.designSubtab === 'svg') {
+        let list = state.candidates.filter(item => item.type === state.designSubtab);
+        const q = state.query.trim().toLowerCase();
+        if (q) list = list.filter(item => `${labelOf(item)} ${item.family || ''} ${item.format || ''} ${item.source || ''}`.toLowerCase().includes(q));
+        return state.designSubtab === 'font'
+          ? list.map((item, i) => ({ item, i, px: itemPixel(item) })).sort((a, b) => (b.px - a.px) || (a.i - b.i)).map(row => row.item)
+          : list;
+      }
+      return [];
     }
     if (tab === 'video') {
       const q = state.query.trim().toLowerCase();
@@ -2608,13 +2619,17 @@
         <button data-tab="selected" title="단축키 1">${iconSvg('list')}<span class="sl-tab-label">선택</span></button>
         <button data-tab="image" title="단축키 2">${iconSvg('image')}<span class="sl-tab-label">이미지</span> <b>0</b></button>
         <button data-tab="video" title="단축키 3">${iconSvg('video')}<span class="sl-tab-label">영상</span> <b>0</b></button>
-        <button data-tab="svg" title="단축키 4">${iconSvg('code')}<span class="sl-tab-label">SVG</span> <b>0</b></button>
-        <button data-tab="font" title="단축키 5">${iconSvg('text')}<span class="sl-tab-label">글꼴</span> <b>0</b></button>
-        <button data-tab="design" title="단축키 6">${iconSvg('audit')}<span class="sl-tab-label">디자인</span></button>
+        <button data-tab="design" title="단축키 4">${iconSvg('audit')}<span class="sl-tab-label">디자인</span></button>
+      </nav>
+      <nav class="sl-design-tabs" role="tablist" hidden>
+        <button data-design-tab="overview">${iconSvg('audit')}<span>종합</span></button>
+        <button data-design-tab="font">${iconSvg('text')}<span>글꼴</span> <b>0</b></button>
+        <button data-design-tab="css">${iconSvg('code')}<span>CSS</span></button>
+        <button data-design-tab="svg">${iconSvg('code')}<span>SVG</span> <b>0</b></button>
       </nav>
       <div class="sl-tools"></div>
       <main class="sl-main"></main>
-      <footer class="sl-foot">Alt(⌥)+클릭: 다른 요소 분석 · <kbd>1</kbd>–<kbd>5</kbd> 탭 · <kbd>/</kbd> 검색 · <kbd>S</kbd> 저장 · <kbd>C</kbd> 복사 · <kbd>Esc</kbd> 닫기</footer>`;
+      <footer class="sl-foot">Alt(⌥)+클릭: 다른 요소 분석 · <kbd>1</kbd>–<kbd>4</kbd> 기본 메뉴 · 디자인 하위 메뉴 · <kbd>/</kbd> 검색 · <kbd>S</kbd> 저장 · <kbd>C</kbd> 복사 · <kbd>Esc</kbd> 닫기</footer>`;
     $('.sl-close', panel).onclick = closePanel;
     $('.sl-dock', panel).onclick = () => {
       state.dock = state.dock === 'left' ? 'right' : 'left';
@@ -2631,8 +2646,8 @@
       const videoBtn = panel.querySelector('[data-tab="video"]');
       const videoCount = videoBtn.querySelector('b');
       if (videoCount) videoCount.textContent = dedupe([...(state.videoItems || []), ...state.candidates.filter(item => item.type === 'video')]).filter(i => i.kind !== 'drm').length;
-      panel.querySelector('[data-tab="svg"] b').textContent = state.candidates.filter(i => i.type === 'svg').length;
-      panel.querySelector('[data-tab="font"] b').textContent = state.candidates.filter(i => i.type === 'font').length;
+      panel.querySelector('[data-design-tab="svg"] b').textContent = state.candidates.filter(i => i.type === 'svg').length;
+      panel.querySelector('[data-design-tab="font"] b').textContent = state.candidates.filter(i => i.type === 'font').length;
     };
 
     const updateBulk = () => {
@@ -2708,8 +2723,8 @@
     const emptyText = () => {
       if (state.activeTab === 'video') return videoEmptyMessage();
       if (state.query.trim()) return `「${state.query.trim()}」에 맞는 항목이 없습니다. 검색어를 지워 보세요.`;
-      if (state.activeTab === 'svg') return '표시할 SVG가 없습니다. 아이콘을 직접 Alt(⌥)+클릭해 보세요.';
-      if (state.activeTab === 'font') return '페이지에서 @font-face 글꼴을 찾지 못했습니다.';
+      if (state.activeTab === 'design' && state.designSubtab === 'svg') return '표시할 SVG가 없습니다. 아이콘을 직접 Alt(⌥)+클릭해 보세요.';
+      if (state.activeTab === 'design' && state.designSubtab === 'font') return '페이지에서 @font-face 글꼴을 찾지 못했습니다.';
       if (state.activeTab === 'image' && state.minPx) return `${state.minPx}px 이상 이미지가 없습니다. 크기 필터를 「모든 크기」로 바꿔 보세요.`;
       if (state.activeTab === 'selected') return '분석한 요소가 없습니다. 이미지·영상을 Alt(⌥)+클릭하거나 「이미지」 탭을 보세요.';
       return '표시할 미디어가 없습니다. 페이지를 스크롤해 이미지를 불러온 뒤 다시 확인하세요.';
@@ -2729,7 +2744,7 @@
         return;
       }
       grid = document.createElement('div');
-      grid.className = state.activeTab === 'video' ? 'sl-vlist' : 'sl-grid';
+      grid.className = state.activeTab === 'video' ? 'sl-vlist' : `sl-grid${state.activeTab === 'design' ? ' sl-design-resource-grid' : ''}${state.activeTab === 'design' && state.designSubtab === 'font' ? ' sl-design-font-grid' : ''}`;
       if (state.activeTab === 'video') {
         const help = document.createElement('p');
         help.className = 'sl-vhelp';
@@ -2741,7 +2756,23 @@
       updateBulk();
     };
 
+    const renderCssTokens = () => {
+      main.textContent = '';
+      const data = state.design || analyzeDesignSystem();
+      state.design = data;
+      const card = document.createElement('section');
+      card.className = 'sl-token-section sl-css-export';
+      card.innerHTML = `<div class="sl-kicker">CSS TOKENS</div><strong>페이지에서 추출한 CSS 변수</strong><p>반복되는 색상·서체·모서리·간격을 재사용 가능한 변수로 정리했습니다.</p>`;
+      const pre = document.createElement('pre'); pre.className = 'sl-code-block'; pre.textContent = data.css;
+      const actions = document.createElement('div'); actions.className = 'sl-design-actions';
+      actions.append(actionButton('primary', 'CSS 복사', () => copy(data.css), 'copy'));
+      actions.append(actionButton('normal', 'JSON 저장', () => downloadBlob(new Blob([data.json], { type: 'application/json' }), `${location.hostname.replace(/^www\\./, '')}-design-tokens.json`), 'save'));
+      card.append(pre, actions); main.append(card);
+    };
+
     const renderDesign = () => {
+      if (state.designSubtab === 'font' || state.designSubtab === 'svg') { renderGrid(); return; }
+      if (state.designSubtab === 'css') { renderCssTokens(); return; }
       main.textContent = '';
       const data = state.design || analyzeDesignSystem();
       state.design = data;
@@ -2781,7 +2812,7 @@
         main.append(box);
       };
       section('주요 색상', 'palette', data.colors, row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<i class="sl-color-dot"></i><code>${esc(row.value)}</code><span>${esc(String(row.count))}회</span>`; el.querySelector('.sl-color-dot').style.background = row.value; return el; });
-      section('타이포그래피', 'text', data.typography, row => { const el = document.createElement('div'); el.className = 'sl-token-row sl-type-row'; el.innerHTML = `<strong>Aa</strong><div><code>${esc(row.family)}</code><small>${esc(row.size)} · ${esc(row.weight)} · 행간 ${esc(row.lineHeight)}</small></div><span>${esc(String(row.count))}회</span>`; el.querySelector('strong').style.fontFamily = row.family; el.querySelector('strong').style.fontSize = row.size; return el; });
+      section('타이포그래피', 'text', data.typography, row => { const el = document.createElement('div'); el.className = 'sl-token-row sl-type-row'; el.innerHTML = `<strong>가나다 ABCD</strong><div><code>${esc(row.family)}</code><small>${esc(row.size)} · ${esc(row.weight)} · 행간 ${esc(row.lineHeight)}</small></div><span>${esc(String(row.count))}회</span>`; el.querySelector('strong').style.fontFamily = row.family; el.querySelector('strong').style.fontSize = row.size; return el; });
       section('그라디언트', 'gradient', data.gradients, row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<i class="sl-gradient-swatch"></i><code>${esc(row.value)}</code><span>${esc(String(row.count))}회</span>`; el.querySelector('.sl-gradient-swatch').style.backgroundImage = row.value; return el; });
       section('컴포넌트 스타일', 'audit', data.components, row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<code>radius ${esc(row.radius)} · ${esc(row.size)} · ${esc(row.weight)}</code><span>${esc(String(row.count))}개</span>`; return el; });
       section('간격·모서리·그림자', 'audit', [...(data.spacing || []).slice(0, 4), ...(data.radii || []).slice(0, 4), ...(data.shadows || []).slice(0, 4)], row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<code>${esc(row.value)}</code><span>${esc(String(row.count))}회</span>`; return el; });
@@ -2795,7 +2826,7 @@
 
     const drawTools = () => {
       tools.textContent = '';
-      if (state.activeTab === 'selected' || state.activeTab === 'design') { tools.hidden = true; return; }
+      if (state.activeTab === 'selected' || (state.activeTab === 'design' && !['font', 'svg'].includes(state.designSubtab))) { tools.hidden = true; return; }
       tools.hidden = false;
       const row = document.createElement('div');
       row.className = 'sl-filter-row';
@@ -2820,7 +2851,7 @@
         size.onchange = () => { state.minPx = Number(size.value) || 0; savePrefs({ minPx: state.minPx }); renderGrid(); };
         row.append(size);
       }
-      if (state.activeTab !== 'svg') {
+      if (!(state.activeTab === 'design' && state.designSubtab === 'svg')) {
         const sort = document.createElement('select');
         sort.className = 'sl-select';
         sort.title = '정렬';
@@ -2892,7 +2923,7 @@
       const metaBtn = mk('sl-act-meta', false);
       metaBtn.title = '선택 항목의 파일명·크기·포맷·원본 주소를 CSV로 저장';
       metaBtn.onclick = () => exportMetadata(bulkTargets(visibleList()), metaBtn);
-      if (state.activeTab === 'svg') {
+      if (state.activeTab === 'design' && state.designSubtab === 'svg') {
         const codeBtn = mk('sl-act-code', false);
         codeBtn.innerHTML = `${iconSvg('code')}<span class="sl-btn-label">코드 복사</span>`;
         codeBtn.onclick = () => {
@@ -2906,9 +2937,9 @@
 
     const drawSelected = () => {
       main.textContent = '';
-      if (state.analysis) main.append(renderStyleAnalysis(state.analysis));
       const item = (state.picked || state.candidates[0]);
       if (!item) {
+        if (state.analysis) main.append(renderStyleAnalysis(state.analysis));
         if (state.analysis) return;
         const box = document.createElement('div');
         box.className = 'sl-empty';
@@ -2962,6 +2993,7 @@
       });
       hydrateMeta(item, card);
       main.append(card);
+      if (state.analysis) main.append(renderStyleAnalysis(state.analysis));
     };
 
     const draw = () => {
@@ -2971,6 +3003,15 @@
           btn.classList.toggle('active', on);
           btn.setAttribute('aria-selected', on ? 'true' : 'false');
         });
+        const designNav = panel.querySelector('.sl-design-tabs');
+        if (designNav) {
+          designNav.hidden = state.activeTab !== 'design';
+          designNav.querySelectorAll('button').forEach(btn => {
+            const on = btn.dataset.designTab === state.designSubtab;
+            btn.classList.toggle('active', on);
+            btn.setAttribute('aria-selected', on ? 'true' : 'false');
+          });
+        }
         updateCounts();
         drawTools();
       if (state.activeTab === 'selected') drawSelected();
@@ -2989,8 +3030,18 @@
       state.activeTab = tab;
       draw();
     };
+    state.switchDesignTab = tab => {
+      if (!['overview', 'font', 'css', 'svg'].includes(tab)) return;
+      state.activeTab = 'design';
+      state.designSubtab = tab;
+      state.selectedKeys.clear();
+      draw();
+    };
     panel.querySelectorAll('.sl-tabs button').forEach(btn => {
       btn.onclick = () => state.switchTab(btn.dataset.tab);
+    });
+    panel.querySelectorAll('.sl-design-tabs button').forEach(btn => {
+      btn.onclick = () => state.switchDesignTab(btn.dataset.designTab);
     });
     state.focusSearch = () => {
       const input = tools.querySelector('.sl-search');
@@ -3001,6 +3052,7 @@
     state.redraw = () => {
       updateCounts();
       if (state.activeTab === 'selected') return;
+      if (state.activeTab === 'design' && !['font', 'svg'].includes(state.designSubtab)) return;
       if (!grid) { renderGrid(); return; }
       visibleList().forEach(item => {
         if (!rendered.has(itemKey(item))) grid.append(makeTile(item));
@@ -3023,7 +3075,9 @@
     state.picked = images.slice().sort((a, b) => itemPixel(b) - itemPixel(a))[0] || state.candidates[0] || null;
     const count = type => state.candidates.filter(i => i.type === type).length;
     state.design = analyzeDesignSystem();
-    state.activeTab = preferTab || (count('image') ? 'image' : count('video') ? 'video' : count('svg') ? 'svg' : count('font') ? 'font' : 'image');
+    state.designSubtab = ['font', 'svg', 'css', 'overview'].includes(preferTab) ? (preferTab === 'font' || preferTab === 'svg' ? preferTab : preferTab) : 'overview';
+    const initialTab = preferTab === 'font' || preferTab === 'svg' || preferTab === 'css' || preferTab === 'overview' ? 'design' : preferTab;
+    state.activeTab = initialTab || (count('image') ? 'image' : count('video') ? 'video' : 'design');
     state.selectedKeys.clear();
     render();
     requestFrameMedia();
@@ -3054,6 +3108,7 @@
     const tag = (collected.media?.tagName || target?.tagName || '').toUpperCase();
     const clickedVideo = tag === 'VIDEO';
     const clickedSvg = tag === 'SVG';
+    const fontCandidates = !clickedVideo && !clickedSvg && analysis?.text ? collectPageFonts() : [];
     state.selectedMedia = clickedVideo ? collected.media : null;
     state.postUrl = postUrl(target);
     const textOnly = !!analysis?.text && !analysis.background && !clickedVideo && !clickedSvg;
@@ -3095,11 +3150,15 @@
     // produced from the exact Alt+clicked node, then fall back to the ranked
     // result only when the page did not expose a direct URL.
     const directPick = list.find(item => item.element && (item.element === collected.media || item.relation === 'target'));
-    state.picked = directPick || list.find(item => !isChromeImage(item.element, item.url)) || list[0] || null;
+    const fontPick = fontCandidates.find(item => {
+      const family = String(item.family || '').split(',')[0].replace(/["']/g, '').trim().toLowerCase();
+      return family && String(analysis?.text?.family || '').toLowerCase().includes(family);
+    });
+    state.picked = fontPick || directPick || list.find(item => !isChromeImage(item.element, item.url)) || list[0] || null;
 
     state.candidates = textOnly ? [] : dedupe([...list, ...collectPageMedia(), ...(state.platformMedia || [])]);
     rememberCapture(state.candidates);
-    state.activeTab = clickedSvg ? 'svg' : clickedVideo ? 'video' : 'selected';
+    state.activeTab = clickedVideo ? 'video' : 'selected';
     if (window !== window.top) {
       try {
         window.top.postMessage({
@@ -3307,8 +3366,10 @@
       return;
     }
     if (!state.panel) return;
-    const tabs = { 1: 'selected', 2: 'image', 3: 'video', 4: 'svg', 5: 'font', 6: 'design' };
+    const tabs = { 1: 'selected', 2: 'image', 3: 'video', 4: 'design' };
     if (!box && tabs[ev.key]) { state.switchTab?.(tabs[ev.key]); ev.stopPropagation(); return; }
+    const designTabs = { 5: 'overview', 6: 'font', 7: 'css', 8: 'svg' };
+    if (!box && state.activeTab === 'design' && designTabs[ev.key]) { state.switchDesignTab?.(designTabs[ev.key]); ev.stopPropagation(); return; }
     if (!box && ev.key === '/') { ev.preventDefault(); ev.stopPropagation(); state.focusSearch?.(); return; }
     const current = state.lightboxItem || state.picked;
     if ((ev.key === 's' || ev.key === 'S') && current) { saveItem(current); ev.stopPropagation(); }

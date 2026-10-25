@@ -200,9 +200,9 @@ function thumb(item) {
     const box = document.createElement('div');
     box.className = 'thumb font-thumb';
     const strong = document.createElement('strong');
-    strong.textContent = 'Aa';
+    strong.textContent = '가나다 ABCD';
     const small = document.createElement('small');
-    small.textContent = item.family || item.format || SL.extOf(item.url, 'font');
+    small.textContent = `다람쥐 헌 쳇바퀴 · The quick brown fox · ${item.family || item.format || SL.extOf(item.url, 'font')}`;
     box.append(strong, small);
     return box;
   }
@@ -567,7 +567,7 @@ $('#zip').onclick = () => {
 $('#openPanel').onclick = async () => {
   const tab = state.tab || await activeTab();
   if (!tab) return;
-  const tabName = { images: 'image', videos: 'video', svgs: 'svg', fonts: 'font' }[state.view];
+  const tabName = state.view === 'svgs' ? 'svg' : state.view === 'fonts' ? 'font' : ({ images: 'image', videos: 'video' }[state.view]);
   api.tabs.sendMessage(tab.id, { type: 'openPanel', tab: tabName }, { frameId: 0 }, () => {
     if (api.runtime.lastError) {
       setStatus('페이지에 연결하지 못했습니다. 페이지를 새로고침한 뒤 다시 눌러 주세요.', 'error');

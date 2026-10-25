@@ -21,7 +21,7 @@
 .sl-platform{display:inline-block;margin-left:7px;padding:2px 8px;border:1px solid var(--sl-brand);border-radius:999px;color:var(--sl-brand);font-size:10px;font-weight:650;text-transform:capitalize}
 .sl-close{position:absolute;top:8px;right:8px;width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:4px;background:transparent;color:var(--sl-ink);font-size:22px;line-height:1;cursor:pointer}
 .sl-close:hover{background:var(--sl-overlay)}
-.sl-tabs{display:grid;grid-template-columns:repeat(6,1fr);gap:0;margin:16px 0 14px;border-bottom:1px solid var(--sl-border)}
+.sl-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin:16px 0 8px;border-bottom:1px solid var(--sl-border)}
 .sl-tabs button{min-height:36px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--sl-muted);font:600 12px/1.2 var(--sl-font);cursor:pointer}
 .sl-tabs button.active{color:var(--sl-brand);border-color:var(--sl-brand)}
 .sl-tabs b{font-weight:600;margin-left:2px}
@@ -55,9 +55,10 @@
 .sl-tile:hover{border-color:var(--sl-brand)}
 .sl-tile-preview{display:block;width:100%;height:116px;object-fit:cover;background:#111;border-radius:4px}
 .sl-tile .sl-svg-media{height:116px}
-.sl-font-media{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:4px;height:116px;background:linear-gradient(135deg,#18251f,#101514);color:var(--sl-ink);border-radius:4px}
-.sl-font-media strong{font:700 42px/1 Georgia,serif;color:var(--sl-brand)}
-.sl-font-media span{max-width:92%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--sl-muted);font-size:11px}
+.sl-font-media{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:6px;height:116px;padding:10px;background:linear-gradient(135deg,#18251f,#101514);color:var(--sl-ink);border-radius:4px;overflow:hidden}
+.sl-font-media strong{max-width:100%;font:700 24px/1.15 var(--sl-font);color:var(--sl-brand);white-space:nowrap;letter-spacing:-.04em}
+.sl-font-media span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--sl-ink);font-size:11px;letter-spacing:-.03em}
+.sl-font-media small{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--sl-muted);font-size:9px}
 .sl-tile strong,.sl-tile small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sl-tile strong{margin-top:7px;font-size:11px;color:var(--sl-ink)}
 .sl-tile small{margin-top:3px;color:var(--sl-muted);font-size:10px}
@@ -107,6 +108,7 @@
 .sl-icon-btn:hover,#sl-panel .sl-close:hover{background:var(--sl-overlay)}
 #sl-panel .sl-close{font-size:20px}
 #sl-panel .sl-tabs{margin:10px 0 8px;flex:none}
+.sl-design-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin:0 0 8px;border-bottom:1px solid var(--sl-border)}.sl-design-tabs[hidden]{display:none}.sl-design-tabs button{min-height:30px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--sl-muted);font:600 10px/1.2 var(--sl-font);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:4px}.sl-design-tabs button.active{color:var(--sl-brand);border-color:var(--sl-brand)}.sl-design-tabs .sl-btn-icon{width:12px;height:12px}.sl-design-tabs b{font-weight:600}
 .sl-tools{flex:none}
 .sl-tools[hidden]{display:none}
 .sl-filter-row{display:flex;gap:6px;margin-bottom:6px}
@@ -126,6 +128,7 @@
 .sl-bulk .sl-btn:disabled{opacity:.45;cursor:default}
 .sl-main{flex:1;min-height:0;overflow:auto;padding-right:2px}
 .sl-tile{position:relative}
+.sl-design-resource-grid{margin-top:4px}.sl-design-font-grid{grid-template-columns:1fr}.sl-design-font-grid .sl-tile-preview{height:132px}
 .sl-tile.is-checked{border-color:var(--sl-brand);box-shadow:0 0 0 1px var(--sl-brand) inset}
 .sl-check{position:absolute;left:10px;top:10px;z-index:2;display:grid;place-items:center;width:22px;height:22px;border-radius:5px;background:rgb(0 0 0 / 55%);cursor:pointer}
 .sl-dim{position:absolute;right:10px;top:10px;z-index:2;max-width:calc(100% - 44px);padding:1px 6px;border-radius:4px;background:rgb(0 0 0 / 65%);color:#fff;font:600 10px/16px var(--sl-font);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
