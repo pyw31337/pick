@@ -1648,7 +1648,7 @@
     plus: '<path d="M14 2h4v12h12v4H18v12h-4V18H2v-4h12V2Z"/>',
     minus: '<path d="M2 14h28v4H2v-4Z"/>',
     trash: '<path d="M5 8h22v4H5V8Zm5-5h12l2 5H8l2-5Zm-2 9h16l-1 17H9L8 12Zm5 4v10h3V16h-3Zm6 0v10h3V16h-3Z"/>'
-    ,audit: '<path d="M5 4h22v24H5V4Zm5 5h12v3H10V9Zm0 6h8v3h-8v-3Zm0 6h12v3H10v-3Z"/><path d="m22 16 2 2 4-5 2 2-6 7-4-4 2-2Z" fill="#3ecf8e"/>',
+    ,audit: '<path fill="currentColor" d="M4.5 1.938a7 7 0 0 1 10.44 5.149c.523 3.972-2.42 4.694-5.37 3.642c-.726-.258-1.57.233-1.57 1.003V14c0 .552-.45 1.007-.997.928a7 7 0 0 1-5.765-5.116A7 7 0 0 1 4.5 1.938M4 7a1 1 0 1 0 0 2a1 1 0 0 0 0-2m1-3a1 1 0 1 0 0 2a1 1 0 0 0 0-2m6 0a1 1 0 1 0 0 2a1 1 0 0 0 0-2M8 3a1 1 0 1 0 0 2a1 1 0 0 0 0-2"/>',
     palette: '<path d="M16 3a13 13 0 0 0 0 26h2a3 3 0 0 0 0-6h-2a2 2 0 0 1 0-4h4a9 9 0 0 0 0-16H16Zm-6 8a2 2 0 1 1 0-4 2 2 0 0 1 0 4Zm5-3a2 2 0 1 1 0-4 2 2 0 0 1 0 4Zm6 3a2 2 0 1 1 0-4 2 2 0 0 1 0 4Z"/>',
     gradient: '<path d="M4 5h24v22H4V5Zm4 4v14h16V9H8Z"/><path d="M8 23 24 9v14H8Z" fill="#3ecf8e"/>',
     shadow: '<path d="M7 5h18v16H7V5Zm4 4v8h10V9H11Z"/><path d="M9 24h14v3H9v-3Z" opacity=".55"/>'
