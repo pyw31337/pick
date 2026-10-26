@@ -1705,7 +1705,7 @@
     const advanced = actionGroup('도구 더보기', 'methods', false);
     actions.append(source.group, save.group, advanced.group);
     source.body.append(actionButton('primary', 'URL 복사', ev => copy(liveUrl(item), ev.currentTarget), 'copy'));
-    if (extra.onUrl) source.body.append(actionButton('normal', extra.urlLabel || 'URL 보기', extra.onUrl, 'link'));
+    if (extra.onUrl) source.body.append(actionButton('normal', extra.urlLabel || 'URL 보기', extra.onUrl, 'open'));
     source.body.append(actionButton('normal', '새 탭에서 열기', () => window.open(liveUrl(item), '_blank', 'noopener'), 'newtab'));
     if (item.type === 'image' || item.type === 'svg') {
       save.body.append(actionButton('primary', '원본 저장', () => saveItem(item), 'original'));
