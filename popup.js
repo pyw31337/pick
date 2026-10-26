@@ -2,15 +2,15 @@ const api = globalThis.chrome;
 const SL = globalThis.SourceLens;
 const $ = s => document.querySelector(s);
 const POPUP_ICONS = {
-  save: '<path d="M6 3h17l5 5v21H6V3Z"/><path d="M10 4v9h11V4h-4v5h-4V4h-3Zm1 14h10v8H11v-8Z" fill="#1c1c1c"/>',
-  copy: '<path d="M9 8h13a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3V11a3 3 0 0 1 3-3Z"/><path d="M5 21H4a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3h13a3 3 0 0 1 3 3v1h-4V6H5v15Z"/>',
-  open: '<path d="M15 4h13v13h-4V11l-11 11-3-3 11-11h-6V4Z"/><path d="M5 5h8v4H9v14h14v-4h4v8H5V5Z"/>',
+  save: '<path fill="currentColor" d="M5 21h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2M8.5 7c.83 0 1.5.67 1.5 1.5S9.33 10 8.5 10 7 9.33 7 8.5 7.67 7 8.5 7M5 17.41l3-3l1.29 1.29c.39.39 1.02.39 1.41 0l5.29-5.29l3 3V19H5v-1.59Z"/>',
+  copy: '<g fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"><path d="M7 9v6a4 4 0 0 0 4 4h4a2 2 0 0 1-2 2H6a4 4 0 0 1-4-4V9a4 4 0 0 1 4-4h1z"/><path d="M13 3.054V7H9.2a2 2 0 0 1 .281-.432l2.46-2.87A2 2 0 0 1 13 3.054M15 3v4a2 2 0 0 1-2 2H9v6a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></g>',
+  open: '<path fill="currentColor" d="M480 96c35.3 0 64 28.7 64 64v320c0 35.3-28.7 64-64 64H160c-35.3 0-64-28.7-64-64V160c0-35.3 28.7-64 64-64zM264 224c-9.7 0-18.5 5.8-22.2 14.8s-1.7 19.3 5.2 26.2l35 35l-67 67c-9.4 9.4-9.4 24.6 0 33.9l24 24c9.4 9.4 24.6 9.4 33.9 0l67-67l35 35c6.9 6.9 17.2 8.9 26.2 5.2S416 385.7 416 376V248c0-13.3-10.7-24-24-24z"/>',
   video: '<path d="M4 6h16a3 3 0 0 1 3 3v2l6-4v18l-6-4v2a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3Z"/><path d="m12 11 7 5-7 5v-10Z" fill="#1c1c1c"/>',
   code: '<path d="m12 5 3 3-6 6 6 6-3 3-9-9 9-9Zm8 0 9 9-9 9-3-3 6-6-6-6 3-3Z"/>',
-  zip: '<path d="M6 3h22v26H6V3Zm5 4v4h4V7h-4Zm4 4v4h4v-4h-4Zm-4 6v4h8v-4h-8Zm0 7h8v4h-8v-4Z"/>',
-  list: '<path d="M5 5h5v5H5V5Zm0 9h5v5H5v-5Zm0 9h5v5H5v-5Zm8-18h14v5H13V5Zm0 9h14v5H13v-5Zm0 9h14v5H13v-5Z"/>'
+  zip: '<path fill="currentColor" d="M15 15h2v2h-2z"/><path fill="currentColor" d="M20 4h-4v2h2v2h-2v2h2v8h-4v-6h2v-2h-2V8h2V6h-2V4h-2.59L10 2.59C9.63 2.22 9.11 2 8.59 2H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6a2 2 0 0 0-2-2"/>',
+  list: '<path fill="currentColor" d="M3 6.25A3.25 3.25 0 0 1 6.25 3h9.5A3.25 3.25 0 0 1 19 6.25v9.5A3.25 3.25 0 0 1 15.75 19h-9.5A3.25 3.25 0 0 1 3 15.75zm12.28 2.78a.75.75 0 0 0-1.06-1.06L10 12.19l-1.97-1.97a.75.75 0 1 0-1.06 1.06l2.5 2.5a.75.75 0 0 0 1.06 0zM6.5 20a3.25 3.25 0 0 0 2.741 1.5h7.005a5.254 5.254 0 0 0 5.254-5.254V9.241A3.25 3.25 0 0 0 19.999 6.5v9.746A3.753 3.753 0 0 1 16.246 20z"/>'
 };
-function popupIcon(name) { return `<svg class="btn-icon filled-icon" viewBox="0 0 32 32" aria-hidden="true">${POPUP_ICONS[name] || POPUP_ICONS.list}</svg>`; }
+function popupIcon(name) { return `<svg class="btn-icon filled-icon" viewBox="${name === 'open' ? '0 0 640 640' : '0 0 32 32'}" aria-hidden="true">${POPUP_ICONS[name] || POPUP_ICONS.list}</svg>`; }
 function setButtonText(button, text) {
   if (!button) return;
   const label = button.querySelector?.('.btn-label');
@@ -27,6 +27,24 @@ const state = {
   videoLocked: false,
   multiTab: false
 };
+
+const popupFontFaces = new Map();
+function popupFontFamily(item) {
+  const source = String(item?.url || item?.family || 'font');
+  let hash = 0;
+  for (let i = 0; i < source.length; i += 1) hash = ((hash << 5) - hash + source.charCodeAt(i)) | 0;
+  const family = `LetsPickPopup${Math.abs(hash)}`;
+  if (!popupFontFaces.has(source)) {
+    popupFontFaces.set(source, family);
+    try {
+      if (typeof FontFace === 'function' && item?.url) {
+        const url = String(item.url).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        new FontFace(family, `url("${url}")`, { weight: item.weight || 'normal', style: item.style || 'normal' }).load().then(face => document.fonts.add(face)).catch(() => {});
+      }
+    } catch { /* fall back to the system face */ }
+  }
+  return family;
+}
 
 function setStatus(text, kind) {
   const el = $('#status');
@@ -200,9 +218,12 @@ function thumb(item) {
     const box = document.createElement('div');
     box.className = 'thumb font-thumb';
     const strong = document.createElement('strong');
-    strong.textContent = '가나다 ABCD';
+    const family = popupFontFamily(item);
+    strong.style.fontFamily = `"${family}", ${item.family ? `"${item.family}"` : 'inherit'}`;
+    strong.textContent = '다람쥐 헌 쳇바퀴';
     const small = document.createElement('small');
-    small.textContent = `다람쥐 헌 쳇바퀴 · The quick brown fox · ${item.family || item.format || SL.extOf(item.url, 'font')}`;
+    small.style.fontFamily = `"${family}", ${item.family ? `"${item.family}"` : 'inherit'}`;
+    small.textContent = `The quick brown fox · ${item.family || item.format || SL.extOf(item.url, 'font')}`;
     box.append(strong, small);
     return box;
   }
@@ -241,6 +262,7 @@ function render() {
     return;
   }
   listEl.classList.toggle('vlist', state.view === 'videos');
+  listEl.classList.toggle('font-list', state.view === 'fonts');
   if (state.view === 'videos') {
     const help = document.createElement('p');
     help.className = 'vhelp';

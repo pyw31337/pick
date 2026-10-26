@@ -56,8 +56,8 @@
 .sl-tile-preview{display:block;width:100%;height:116px;object-fit:cover;background:#111;border-radius:4px}
 .sl-tile .sl-svg-media{height:116px}
 .sl-font-media{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:6px;height:116px;padding:10px;background:linear-gradient(135deg,#18251f,#101514);color:var(--sl-ink);border-radius:4px;overflow:hidden}
-.sl-font-media strong{max-width:100%;font:700 24px/1.15 var(--sl-font);color:var(--sl-brand);white-space:nowrap;letter-spacing:-.04em}
-.sl-font-media span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--sl-ink);font-size:11px;letter-spacing:-.03em}
+.sl-font-media strong{max-width:100%;font:700 24px/1.15 var(--sl-preview-font,var(--sl-font));color:var(--sl-brand);white-space:nowrap;letter-spacing:-.04em}
+.sl-font-media span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--sl-ink);font:400 11px/1.25 var(--sl-preview-font,var(--sl-font));letter-spacing:-.03em}
 .sl-font-media small{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--sl-muted);font-size:9px}
 .sl-tile strong,.sl-tile small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sl-tile strong{margin-top:7px;font-size:11px;color:var(--sl-ink)}

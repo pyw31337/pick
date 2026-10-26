@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Let's Pick",
   "short_name": "Let's Pick",
-  "version": "1.4.5",
+  "version": "1.4.6",
   "description": "페이지의 이미지·영상·SVG·글꼴 원본을 찾고, 렌더링된 디자인 토큰과 일관성까지 분석하는 Let's Pick.",
   "permissions": [
     "contextMenus",

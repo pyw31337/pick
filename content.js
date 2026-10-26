@@ -1533,7 +1533,9 @@
     if (item.type === 'font') {
       const holder = document.createElement('div');
       holder.className = `sl-font-media ${className || ''}`;
-      holder.innerHTML = `<strong>가나다 ABCD</strong><span>다람쥐 헌 쳇바퀴 · The quick brown fox</span><small>${esc(item.family || item.format || SL.extOf(item.url, 'font'))}</small>`;
+      const family = fontPreviewFamily(item);
+      holder.style.setProperty('--sl-preview-font', `"${family}"`);
+      holder.innerHTML = `<strong>다람쥐 헌 쳇바퀴</strong><span>The quick brown fox jumps over the lazy dog</span><small>${esc(item.family || item.format || SL.extOf(item.url, 'font'))}</small>`;
       return holder;
     }
     if (item.type === 'svg' || /\.svg(?:$|[?#])/i.test(item.url || '') || /^data:image\/svg/i.test(item.url || '')) {
@@ -1590,17 +1592,51 @@
     return node;
   }
 
+  // Load each discovered @font-face so the preview is rendered by the actual
+  // downloaded font file, instead of the extension's UI fallback font.
+  const fontFaceCache = new Map();
+  function fontPreviewFamily(item) {
+    const source = String(item?.url || item?.family || 'font');
+    let hash = 0;
+    for (let i = 0; i < source.length; i += 1) hash = ((hash << 5) - hash + source.charCodeAt(i)) | 0;
+    const family = `LetsPickPreview${Math.abs(hash)}`;
+    const cached = fontFaceCache.get(source);
+    if (cached) return cached.family;
+    fontFaceCache.set(source, { family, status: 'loading' });
+    try {
+      if (typeof FontFace !== 'function' || !item?.url) return item?.family || family;
+      const url = String(item.url).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const face = new FontFace(family, `url("${url}")`, {
+        weight: item.weight || 'normal',
+        style: item.style || 'normal'
+      });
+      face.load().then(loaded => {
+        document.fonts.add(loaded);
+        const row = fontFaceCache.get(source);
+        if (row) row.status = 'loaded';
+      }).catch(() => {
+        const row = fontFaceCache.get(source);
+        if (row) row.status = 'failed';
+      });
+    } catch { /* invalid or cross-origin font files use the visible fallback */ }
+    return family;
+  }
+
   const UI_ICONS = {
-    link: '<path d="M11 21a6 6 0 0 1 0-12h4v4h-4a2 2 0 1 0 0 4h4l-4 4Zm10-10a6 6 0 0 1 0 12h-4v-4h4a2 2 0 1 0 0-4h-4l4-4Z"/><path d="M11 14h10v4H11z"/>',
-    copy: '<path d="M9 8h13a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3V11a3 3 0 0 1 3-3Z"/><path d="M5 21H4a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3h13a3 3 0 0 1 3 3v1h-4V6H5v15Z"/>',
-    open: '<path d="M15 4h13v13h-4V11l-11 11-3-3 11-11h-6V4Z"/><path d="M5 5h8v4H9v14h14v-4h4v8H5V5Z"/>',
-    save: '<path d="M6 3h17l5 5v21H6V3Z"/><path d="M10 4v9h11V4h-4v5h-4V4h-3Z" fill="#1c1c1c"/><path d="M11 18h10v8H11v-8Z" fill="#1c1c1c"/>',
+    link: '<path fill="currentColor" d="M326.612 185.391c59.747 59.809 58.927 155.698.36 214.59c-.11.12-.24.25-.36.37l-67.2 67.2c-59.27 59.27-155.699 59.262-214.96 0c-59.27-59.26-59.27-155.7 0-214.96l37.106-37.106c9.84-9.84 26.786-3.3 27.294 10.606c.648 17.722 3.826 35.527 9.69 52.721c1.986 5.822.567 12.262-3.783 16.612l-13.087 13.087c-28.026 28.026-28.905 73.66-1.155 101.96c28.024 28.579 74.086 28.749 102.325.51l67.2-67.19c28.191-28.191 28.073-73.757 0-101.83c-3.701-3.694-7.429-6.564-10.341-8.569a16.04 16.04 0 0 1-6.947-12.606c-.396-10.567 3.348-21.456 11.698-29.806l21.054-21.055c5.521-5.521 14.182-6.199 20.584-1.731a152.5 152.5 0 0 1 20.522 17.197M467.547 44.449c-59.261-59.262-155.69-59.27-214.96 0l-67.2 67.2c-.12.12-.25.25-.36.37c-58.566 58.892-59.387 154.781.36 214.59a152.5 152.5 0 0 0 20.521 17.196c6.402 4.468 15.064 3.789 20.584-1.731l21.054-21.055c8.35-8.35 12.094-19.239 11.698-29.806a16.04 16.04 0 0 0-6.947-12.606c-2.912-2.005-6.64-4.875-10.341-8.569c-28.073-28.073-28.191-73.639 0-101.83l67.2-67.19c28.239-28.239 74.3-28.069 102.325.51c27.75 28.3 26.872 73.934-1.155 101.96l-13.087 13.087c-4.35 4.35-5.769 10.79-3.783 16.612c5.864 17.194 9.042 34.999 9.69 52.721c.509 13.906 17.454 20.446 27.294 10.606l37.106-37.106c59.271-59.259 59.271-155.699.001-214.959"/>',
+    copy: '<g fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"><path d="M7 9v6a4 4 0 0 0 4 4h4a2 2 0 0 1-2 2H6a4 4 0 0 1-4-4V9a4 4 0 0 1 4-4h1z"/><path d="M13 3.054V7H9.2a2 2 0 0 1 .281-.432l2.46-2.87A2 2 0 0 1 13 3.054M15 3v4a2 2 0 0 1-2 2H9v6a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></g>',
+    open: '<path fill="currentColor" d="M480 96c35.3 0 64 28.7 64 64v320c0 35.3-28.7 64-64 64H160c-35.3 0-64-28.7-64-64V160c0-35.3 28.7-64 64-64zM264 224c-9.7 0-18.5 5.8-22.2 14.8s-1.7 19.3 5.2 26.2l35 35l-67 67c-9.4 9.4-9.4 24.6 0 33.9l24 24c9.4 9.4 24.6 9.4 33.9 0l67-67l35 35c6.9 6.9 17.2 8.9 26.2 5.2S416 385.7 416 376V248c0-13.3-10.7-24-24-24z"/>',
+    newtab: '<path fill="currentColor" d="M11 3H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h5.333a4.75 4.75 0 0 1 4.417-6.5h3.5c.618 0 1.208.118 1.75.333V8h-7.75A2.25 2.25 0 0 1 11 5.75zm10 3.5V6a3 3 0 0 0-3-3h-5.5v2.75c0 .414.336.75.75.75zM23 19.25a3.75 3.75 0 0 0-3.75-3.75l-.102.007A.75.75 0 0 0 19.25 17l.154.005a2.25 2.25 0 0 1-.154 4.495l-.003.005l-.102.007a.75.75 0 0 0 .108 1.493V23l.2-.005A3.75 3.75 0 0 0 23 19.25m-6.5-3a.75.75 0 0 0-.75-.75l-.2.005a.75.75 0 0 0 .2 1.495h3.5l.102-.007A.75.75 0 0 0 19.25 20h-3.5l-.102.007A.75.75 0 0 0 15.75 17l.102-.007a2.25 2.25 0 0 0 .648-.743"/>',
+    save: '<path fill="currentColor" d="M5 21h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2M8.5 7c.83 0 1.5.67 1.5 1.5S9.33 10 8.5 10 7 9.33 7 8.5 7.67 7 8.5 7M5 17.41l3-3l1.29 1.29c.39.39 1.02.39 1.41 0l5.29-5.29l3 3V19H5v-1.59Z"/>',
+    original: '<path fill="currentColor" d="M5 21h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2M8.5 7c.83 0 1.5.67 1.5 1.5S9.33 10 8.5 10 7 9.33 7 8.5 7.67 7 8.5 7M5 17.41l3-3l1.29 1.29c.39.39 1.02.39 1.41 0l5.29-5.29l3 3V19H5v-1.59Z"/>',
+    jpg: '<path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2M9 13.5c0 1.1-.9 1.5-2 1.5s-2-.4-2-1.5V12h1.5v1.5h1V9H9zm5-2c0 .8-.7 1.5-1.5 1.5h-1v2H10V9h2.5c.8 0 1.5.7 1.5 1.5zm5-1h-2.5v3h1V12H19v1.7c0 .7-.5 1.3-1.3 1.3h-1.3c-.8 0-1.3-.7-1.3-1.3v-3.3c-.1-.7.4-1.4 1.2-1.4h1.3c.8 0 1.3.7 1.3 1.3v.2m-7.4 0h1v1h-1z"/>',
+    png: '<path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2M9 11.5c0 .8-.7 1.5-1.5 1.5h-1v2H5V9h2.5C8.3 9 9 9.7 9 10.5zm5 3.5h-1.5l-1-2.5V15H10V9h1.5l1 2.5V9H14zm5-4.5h-2.5v3h1V12H19v1.7c0 .7-.5 1.3-1.3 1.3h-1.3c-.8 0-1.3-.7-1.3-1.3v-3.3c-.1-.7.4-1.4 1.2-1.4h1.3c.8 0 1.3.7 1.3 1.3v.2zm-12.5 0h1v1h-1z"/>',
     image: '<path d="M5 4h22a3 3 0 0 1 3 3v18a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z"/><circle cx="10" cy="11" r="3" fill="#1c1c1c"/><path d="m4 25 8-8 5 5 4-4 6 7H4Z" fill="#1c1c1c"/>',
     video: '<path d="M4 6h16a3 3 0 0 1 3 3v2l6-4v18l-6-4v2a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3Z"/><path d="m12 11 7 5-7 5v-10Z" fill="#1c1c1c"/>',
     code: '<path d="m12 5 3 3-6 6 6 6-3 3-9-9 9-9Zm8 0 9 9-9 9-3-3 6-6-6-6 3-3Z"/>',
     text: '<path d="M4 5h24v5h-9v17h-6V10H4V5Z"/>',
-    slice: '<path d="M4 6h24v4H4V6Zm0 9h24v4H4v-4Zm0 9h24v4H4v-4ZM9 3h4v26H9V3Zm10 0h4v26h-4V3Z"/>',
-    list: '<path d="M5 5h5v5H5V5Zm0 9h5v5H5v-5Zm0 9h5v5H5v-5Zm8-18h14v5H13V5Zm0 9h14v5H13v-5Zm0 9h14v5H13v-5Z"/>',
+    slice: '<path fill="currentColor" d="M8.5 1A1.5 1.5 0 0 1 10 2.5V4H2V2.5A1.5 1.5 0 0 1 3.5 1zm2 4a.5.5 0 0 1 0 1h-9a.5.5 0 0 1 0-1zM2 7v1.5A1.5 1.5 0 0 0 3.5 10h5A1.5 1.5 0 0 0 10 8.5V7z"/>',
+    list: '<path fill="currentColor" d="M3 6.25A3.25 3.25 0 0 1 6.25 3h9.5A3.25 3.25 0 0 1 19 6.25v9.5A3.25 3.25 0 0 1 15.75 19h-9.5A3.25 3.25 0 0 1 3 15.75zm12.28 2.78a.75.75 0 0 0-1.06-1.06L10 12.19l-1.97-1.97a.75.75 0 1 0-1.06 1.06l2.5 2.5a.75.75 0 0 0 1.06 0zM6.5 20a3.25 3.25 0 0 0 2.741 1.5h7.005a5.254 5.254 0 0 0 5.254-5.254V9.241A3.25 3.25 0 0 0 19.999 6.5v9.746A3.753 3.753 0 0 1 16.246 20z"/>',
     terminal: '<path d="M4 4h24a3 3 0 0 1 3 3v18a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z"/><path d="m8 11 5 5-5 5-3-3 2-2-2-2 3-3Zm8 8h8v4h-8v-4Z" fill="#1c1c1c"/>',
     zip: '<path d="M6 3h22v26H6V3Zm5 4v4h4V7h-4Zm4 4v4h4v-4h-4Zm-4 6v4h8v-4h-8Zm0 7h8v4h-8v-4Z"/>',
     methods: '<path d="M16 2a14 14 0 1 0 0 28 14 14 0 0 0 0-28Zm2 7v6l5 3-2 3-7-4V9h4Z"/>',
@@ -1618,8 +1654,10 @@
     shadow: '<path d="M7 5h18v16H7V5Zm4 4v8h10V9H11Z"/><path d="M9 24h14v3H9v-3Z" opacity=".55"/>'
   };
 
+  const UI_ICON_VIEWS = { list: '0 0 24 24', audit: '0 0 16 16', link: '0 0 512 512', copy: '0 0 24 24', open: '0 0 640 640', newtab: '0 0 24 24', save: '0 0 24 24', original: '0 0 24 24', jpg: '0 0 24 24', png: '0 0 24 24', slice: '0 0 12 12' };
+
   function iconSvg(name) {
-    return `<svg class="sl-btn-icon sl-icon-filled" viewBox="0 0 32 32" aria-hidden="true">${UI_ICONS[name] || UI_ICONS.link}</svg>`;
+    return `<svg class="sl-btn-icon sl-icon-filled" viewBox="${UI_ICON_VIEWS[name] || '0 0 32 32'}" aria-hidden="true">${UI_ICONS[name] || UI_ICONS.link}</svg>`;
   }
 
   function setButtonText(button, text) {
@@ -1668,11 +1706,11 @@
     actions.append(source.group, save.group, advanced.group);
     source.body.append(actionButton('primary', 'URL 복사', ev => copy(liveUrl(item), ev.currentTarget), 'copy'));
     if (extra.onUrl) source.body.append(actionButton('normal', extra.urlLabel || 'URL 보기', extra.onUrl, 'link'));
-    source.body.append(actionButton('normal', '새 탭에서 열기', () => window.open(liveUrl(item), '_blank', 'noopener'), 'open'));
+    source.body.append(actionButton('normal', '새 탭에서 열기', () => window.open(liveUrl(item), '_blank', 'noopener'), 'newtab'));
     if (item.type === 'image' || item.type === 'svg') {
-      save.body.append(actionButton('primary', '원본 저장', () => saveItem(item), 'save'));
+      save.body.append(actionButton('primary', '원본 저장', () => saveItem(item), 'original'));
       [['JPG', 'jpg', 'image/jpeg'], ['PNG', 'png', 'image/png'], ['WebP', 'webp', 'image/webp']].forEach(([label, ext, mime]) => {
-        save.body.append(actionButton('normal', `${label} 저장`, ev => convertImage(item, { label, ext, mime }, ev.currentTarget), 'image'));
+        save.body.append(actionButton('normal', `${label} 저장`, ev => convertImage(item, { label, ext, mime }, ev.currentTarget), ext === 'jpg' ? 'jpg' : ext === 'png' ? 'png' : 'save'));
       });
       advanced.body.append(actionButton('normal', '분할 편집', () => { extra.onSlice?.(); openSliceEditor(item); }, 'slice'));
     }
