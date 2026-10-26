@@ -41,3 +41,4 @@ html{scrollbar-color:#91a59f #edf3f0;scrollbar-width:thin}
 .flow-arrow{width:24px;height:24px;font-size:0}
 .tip-icon{width:22px;height:22px;padding:3px;border-radius:50%;background:var(--mint);color:var(--ink)}
 .note-mark{width:30px;height:30px;padding:6px;border-radius:50%;background:#fff0c7;color:#9d741e;margin-bottom:34px}
+.feature-icon{overflow:hidden}.feature-icon .icon-line svg,.feature-icon.icon-line svg{display:block;width:32px;height:32px;max-width:32px;max-height:32px;overflow:visible}
