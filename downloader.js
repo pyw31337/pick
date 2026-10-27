@@ -60,7 +60,7 @@ async function get(url, { range, asText, onBytes, signal } = {}) {
     for (const credentials of attempt % 2 ? ['include'] : ['omit']) {
       try {
         const headers = range ? { Range: `bytes=${range[0]}-${range[1] ?? ''}` } : {};
-        const res = await fetch(url, { credentials, headers, signal, cache: 'no-store', redirect: 'follow' });
+        const res = await fetch(url, { credentials, headers, signal, cache: 'no-store', redirect: 'follow', referrer: job.referer || undefined, referrerPolicy: 'strict-origin-when-cross-origin' });
         if (!res.ok) { last = `HTTP ${res.status}`; if (res.status === 404 || res.status === 410) attempt = 9; continue; }
         if (asText) return await res.text();
         if (!onBytes || !res.body) return new Uint8Array(await res.arrayBuffer());

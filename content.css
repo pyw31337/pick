@@ -101,7 +101,9 @@
 /* ---- 1.0 panel layout ---- */
 #sl-panel{display:flex;flex-direction:column;overflow:hidden;padding:12px 14px 10px;width:min(440px,calc(100vw - 32px))}
 #sl-panel.is-left{right:auto;left:16px}
-.sl-topbar{display:flex;align-items:center;gap:6px;flex:none}
+.sl-topbar{display:flex;align-items:center;gap:6px;flex:none;user-select:none;cursor:grab}
+.sl-topbar:active{cursor:grabbing}
+.sl-topbar button,.sl-topbar .sl-platform{cursor:pointer}
 .sl-topbar h2{margin:0;font-size:15px;line-height:24px;font-weight:650;letter-spacing:-.3px;color:var(--sl-ink)}
 .sl-spacer{flex:1}
 .sl-icon-btn,#sl-panel .sl-close{position:static;width:30px;height:30px;display:grid;place-items:center;border:1px solid var(--sl-border);border-radius:6px;background:var(--sl-surface);color:var(--sl-ink);font-size:16px;line-height:1;cursor:pointer;padding:0}

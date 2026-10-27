@@ -22,11 +22,21 @@
     return 'other';
   };
   V.site = site;
-  const NOISE = /googlevideo\.com|\/videoplayback|bytestart=|byteend=|[?&]range=|\/range\/|init\.mp4$|\.m4s(?:$|[?#])|\.ts(?:$|[?#])|\.m4a(?:$|[?#])|\.aac(?:$|[?#])/i;
+  // A CDN hostname is not evidence that a response is a segment.  The old
+  // implementation treated every googlevideo/fbcdn/cdninstagram URL as noise,
+  // which discarded valid whole-file media before the download path saw it.
+  // Only discard URLs that actually look like a segment/range request.
+  const CDN = /(?:googlevideo\.com|fbcdn\.net|cdninstagram\.com|tiktokcdn\.com)/i;
+  const SEGMENT_QUERY = /[?&](?:range|bytestart|byteend|sq|segment|chunk|part)=/i;
+  const NOISE = /bytestart=|byteend=|[?&]range=|\/range\/|init\.mp4$|\.m4s(?:$|[?#])|\.ts(?:$|[?#])|\.m4a(?:$|[?#])|\.aac(?:$|[?#])/i;
   const isManifest = url => /\.m3u8(?:$|[?#])|\.mpd(?:$|[?#])|format=m3u8|manifest\(format=/i.test(url);
   const manifestType = url => (/\.mpd(?:$|[?#])|format=mpd/i.test(url) ? 'dash' : 'hls');
   const FILE = /\.(?:mp4|m4v|webm|mov|mkv)(?:$|[?#])/i;
   const SEGMENT = /(?:[_\-/](?:seg|chunk|frag|init|part)[_\-]?\d*|[_\-]\d{1,6})\.(?:m4v|m4s|mp4|m4a|webm|cmfv|cmfa)(?:$|[?#])/i;
+  const isSegmentUrl = url => {
+    const s = String(url || '');
+    return SEGMENT.test(s) || (CDN.test(s) && SEGMENT_QUERY.test(s)) || NOISE.test(s);
+  };
 
   // ------------------------------------------------------------------ inputs
   root.addEventListener('sl-video-groups', ev => {
@@ -37,7 +47,7 @@
     const url = ev.detail?.url;
     if (!url) return;
     const manifest = ev.detail.manifest || (isManifest(url) ? manifestType(url) : '');
-    if (!manifest && (!FILE.test(url) || NOISE.test(url))) return;
+    if (!manifest && (!FILE.test(url) || isSegmentUrl(url))) return;
     if (!st.net.has(url)) {
       st.net.set(url, { url, manifest, t: Date.now() });
       if (st.net.size > 120) st.net.delete(st.net.keys().next().value);
@@ -274,24 +284,26 @@
     const fileUrls = new Map();
     videos.forEach(v => {
       [v.currentSrc, v.src, ...[...v.querySelectorAll('source')].map(x => x.src)].forEach(u => {
-        if (u && /^https?:/i.test(u) && !isManifest(u) && !NOISE.test(u)) fileUrls.set(u, { el: v, w: v.videoWidth, h: v.videoHeight });
+        if (u && /^https?:/i.test(u) && !isManifest(u) && !isSegmentUrl(u)) fileUrls.set(u, { el: v, w: v.videoWidth, h: v.videoHeight });
         else if (u && isManifest(u) && !manifests.has(u)) {
           push({ type: 'video', kind: manifestType(u), url: u, quality: '', source: '영상 태그 스트림', title: pageTitle, ext: 'mp4', job: { kind: manifestType(u), url: u, referer: location.href, title: pageTitle }, note: '스트리밍 · 조각을 모두 받아 하나의 MP4로 합칩니다' });
           probe(u);
         }
       });
     });
-    // Files the page fetches itself (fetch/XHR) are MSE stream pieces, never whole videos, so only the
-    // browser's own media requests (a <video> playing a real file, seen by the service worker) count here.
-    if (s !== 'instagram' && s !== 'facebook' && s !== 'youtube') {
-      st.sw.filter(m => !m.manifest && m.type === 'media' && (m.size || 0) > 200_000 && !SEGMENT.test(m.url)).forEach(m => { if (!fileUrls.has(m.url)) fileUrls.set(m.url, { size: m.size }); });
-    }
+    // The service worker sees whole-file media requests even when the platform
+    // does not expose them through <video>.  Keep valid platform CDN files and
+    // reject only known segment/range requests.
+    st.sw.filter(m => !m.manifest && m.type === 'media' && (m.size || 0) > 200_000 && !isSegmentUrl(m.url))
+      .forEach(m => { if (!fileUrls.has(m.url)) fileUrls.set(m.url, { size: m.size, mime: m.mime }); });
     fileUrls.forEach((info, url) => {
-      if (/googlevideo|fbcdn|cdninstagram/.test(url)) return;
+      // A media request can be an audio track or an HTML/JSON error response.
+      // Never advertise those as an MP4 download.
+      if (info.mime && !/^video\//i.test(info.mime) && info.mime !== 'application/octet-stream') return;
       push({
         type: 'video', kind: 'direct', url, quality: pLabel(info.w, info.h), rank: Math.min(info.w || 0, info.h || 0), width: info.w || 0, height: info.h || 0,
-        audio: null, size: info.size || 0, element: info.el || null, title: pageTitle, ext: (/\.(webm|mov|m4v|mkv)(?:$|[?#])/i.exec(url) || [0, 'mp4'])[1].toLowerCase(),
-        source: info.el ? '영상 파일' : '네트워크 영상 파일', note: '원본 파일 · 바로 저장'
+        audio: null, size: info.size || 0, mime: info.mime || '', element: info.el || null, title: pageTitle, ext: (/\.(webm|mov|m4v|mkv)(?:$|[?#])/i.exec(url) || [0, 'mp4'])[1].toLowerCase(),
+        accessMode: 'direct', source: info.el ? '영상 파일' : '네트워크 영상 파일', note: '원본 파일 · 바로 저장'
       });
     });
 
@@ -384,7 +396,7 @@
   V.plain = item => ({
     type: 'video', kind: item.kind, badge: item.badge, url: /^video:|^drm:/.test(item.url || '') ? '' : (item.url || ''), vid: item.vid || '',
     quality: item.quality || '', codec: item.codec || '', audio: item.audio, note: item.note || '', source: item.source || '',
-    width: item.width || 0, height: item.height || 0, playing: !!item.playing, poster: item.poster || '', file: item.file,
+    width: item.width || 0, height: item.height || 0, size: item.size || 0, mime: item.mime || '', accessMode: item.accessMode || item.kind, playing: !!item.playing, poster: item.poster || '', file: item.file,
     duration: item.duration || 0, job: item.job ? { ...item.job } : null, title: item.title || ''
   });
 })();

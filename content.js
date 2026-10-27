@@ -15,7 +15,8 @@
     profile: null, observer: null, scanTimer: 0, redraw: null, platformMedia: [],
     recorder: null, captureTimer: 0, videoItems: [],
     query: '', minPx: 0, sort: 'big', selectedKeys: new Set(), dock: 'right', altClick: true,
-    lastPoint: null, lightboxItem: null, toastTimer: 0, autoVideo: true
+    lastPoint: null, lightboxItem: null, toastTimer: 0, autoVideo: true,
+    panelPosition: null
   };
   const VERSION = (() => { try { return chrome.runtime.getManifest().version; } catch { return ''; } })();
   const SAVE_MAX = 100;
@@ -30,12 +31,24 @@
         if (p.sort === 'big' || p.sort === 'page') state.sort = p.sort;
         state.altClick = p.altClick !== false;
         state.autoVideo = p.autoVideo !== false;
+        if (p.panelPosition && Number.isFinite(p.panelPosition.left) && Number.isFinite(p.panelPosition.top)) {
+          state.panelPosition = { left: p.panelPosition.left, top: p.panelPosition.top };
+          const panel = state.panel?.querySelector('#sl-panel');
+          if (panel) applyPanelPosition(panel);
+        }
       });
       chrome.storage.onChanged?.addListener((changes, area) => {
         if (area !== 'local' || !changes.slPrefs) return;
         const p = changes.slPrefs.newValue || {};
         state.altClick = p.altClick !== false;
         state.autoVideo = p.autoVideo !== false;
+        if (p.panelPosition && Number.isFinite(p.panelPosition.left) && Number.isFinite(p.panelPosition.top)) {
+          state.panelPosition = { left: p.panelPosition.left, top: p.panelPosition.top };
+        } else if (Object.prototype.hasOwnProperty.call(p, 'panelPosition')) {
+          state.panelPosition = null;
+        }
+        const panel = state.panel?.querySelector('#sl-panel');
+        if (panel && state.panelPosition) applyPanelPosition(panel);
         if (p.dock === 'left' || p.dock === 'right') {
           state.dock = p.dock;
           state.panel?.querySelector('#sl-panel')?.classList.toggle('is-left', state.dock === 'left');
@@ -1806,9 +1819,29 @@
         setLabel('저장됨');
         return { ok: true, mode: 'file', file: item.file };
       }
+      // chrome.downloads cannot always replay a session-bound CDN URL.  For
+      // reasonably sized files, retry in the extension context with cookies
+      // and the platform's configured Referer, then save the verified bytes.
+      // This is deliberately bounded so large videos continue to use the
+      // browser's streaming download instead of being buffered in memory.
+      if (!item.size || item.size <= 40 * 1024 * 1024) {
+        try {
+          const blob = await fetchBytes(item.url);
+          if (!/^video\//i.test(blob.type || '') && blob.type !== 'application/octet-stream') throw new Error(`응답 형식이 영상이 아닙니다 (${blob.type || '알 수 없음'})`);
+          const ok = await new Promise(resolve => downloadBlob(blob, item.file || VF.fileName(item, item.ext), resolve));
+          if (ok !== false) {
+            toast(`세션 권한으로 영상을 저장했습니다 · ${item.file || ''}`);
+            setLabel('저장됨');
+            return { ok: true, mode: 'file-fetch', file: item.file };
+          }
+        } catch (error) {
+          console.debug("[Let's Pick] direct fetch fallback failed", error);
+        }
+      }
       // The file URL was refused (expired / blocked): try the next-best method for the same video.
       const items = refreshVideoItems();
-      const alt = items.find(i => i !== item && i.group && i.group === item.group && (i.kind === 'dash' || (i.kind === 'direct' && i.url !== item.url)));
+      const alt = items.find(i => i !== item && i.group && i.group === item.group && (i.kind === 'dash' || (i.kind === 'direct' && i.url !== item.url)))
+        || items.find(i => i.kind === 'record' && (!item.element || !i.element || i.element === item.element));
       if (alt) { toast('원본 주소가 거절되어 다른 방법으로 다시 시도합니다'); return saveVideo(alt, button); }
       setLabel('실패');
       const msg = `원본 주소가 거절됐습니다 (${res?.error || '알 수 없음'}). 페이지를 새로고침하고 영상을 다시 재생한 뒤 시도하거나 「녹화」를 쓰세요.`;
@@ -2043,7 +2076,7 @@
 
   function fetchBytes(url) {
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ type: 'fetchResource', url }, result => {
+      chrome.runtime.sendMessage({ type: 'fetchResource', url, referer: location.href }, result => {
         if (chrome.runtime.lastError || result?.error) return reject(new Error(result?.error || chrome.runtime.lastError.message));
         if (result?.base64) return resolve(blobFromBase64(result.base64, result.mime));
         if (result?.buffer) return resolve(new Blob([result.buffer], { type: result.mime || 'application/octet-stream' }));
@@ -2236,7 +2269,7 @@
       metaActive += 1;
       const finish = result => { metaActive -= 1; job.resolve(result || {}); pumpMeta(); };
       try {
-        chrome.runtime.sendMessage({ type: 'resourceMeta', url: job.url }, result => {
+        chrome.runtime.sendMessage({ type: 'resourceMeta', url: job.url, referer: location.href }, result => {
           void chrome.runtime.lastError;
           finish(result);
         });
@@ -2622,6 +2655,65 @@
     return chosen.length ? chosen : list;
   }
 
+  function applyPanelPosition(panel) {
+    const position = state.panelPosition;
+    if (!position || !Number.isFinite(position.left) || !Number.isFinite(position.top)) return;
+    const width = panel.getBoundingClientRect().width || 440;
+    const height = panel.getBoundingClientRect().height || 240;
+    const left = Math.max(8, Math.min(Math.max(8, window.innerWidth - width - 8), position.left));
+    const top = Math.max(8, Math.min(Math.max(8, window.innerHeight - height - 8), position.top));
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+    panel.style.right = 'auto';
+    panel.classList.remove('is-left');
+  }
+
+  function enablePanelDrag(panel) {
+    const handle = panel.querySelector('.sl-topbar');
+    if (!handle) return;
+    handle.classList.add('sl-drag-handle');
+    let drag = null;
+    const onMove = event => {
+      if (!drag) return;
+      const rect = panel.getBoundingClientRect();
+      const left = Math.max(8, Math.min(Math.max(8, window.innerWidth - rect.width - 8), drag.left + event.clientX - drag.x));
+      const top = Math.max(8, Math.min(Math.max(8, window.innerHeight - rect.height - 8), drag.top + event.clientY - drag.y));
+      panel.style.left = `${left}px`;
+      panel.style.top = `${top}px`;
+      panel.style.right = 'auto';
+      panel.classList.remove('is-left');
+    };
+    const stop = () => {
+      if (!drag) return;
+      const pointerId = drag.pointerId;
+      const left = parseFloat(panel.style.left);
+      const top = parseFloat(panel.style.top);
+      drag = null;
+      handle.releasePointerCapture?.(pointerId);
+      window.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('pointerup', stop, true);
+      window.removeEventListener('pointercancel', stop, true);
+      if (Number.isFinite(left) && Number.isFinite(top)) {
+        state.panelPosition = { left, top };
+        savePrefs({ panelPosition: state.panelPosition });
+      }
+    };
+    handle.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || event.target.closest('button')) return;
+      const rect = panel.getBoundingClientRect();
+      drag = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top, pointerId: event.pointerId };
+      panel.style.left = `${rect.left}px`;
+      panel.style.top = `${rect.top}px`;
+      panel.style.right = 'auto';
+      panel.classList.remove('is-left');
+      handle.setPointerCapture?.(event.pointerId);
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', stop, true);
+      window.addEventListener('pointercancel', stop, true);
+      event.preventDefault();
+    });
+  }
+
   function render() {
     // Rebuilding the panel is part of every inspection. Preserve the current
     // analysis payload while tearing down the previous DOM; otherwise
@@ -2668,11 +2760,17 @@
       <div class="sl-tools"></div>
       <main class="sl-main"></main>
       <footer class="sl-foot">Alt(⌥)+클릭: 다른 요소 분석 · <kbd>1</kbd>–<kbd>4</kbd> 기본 메뉴 · 디자인 하위 메뉴 · <kbd>/</kbd> 검색 · <kbd>S</kbd> 저장 · <kbd>C</kbd> 복사 · <kbd>Esc</kbd> 닫기</footer>`;
+    applyPanelPosition(panel);
     $('.sl-close', panel).onclick = closePanel;
+    enablePanelDrag(panel);
     $('.sl-dock', panel).onclick = () => {
       state.dock = state.dock === 'left' ? 'right' : 'left';
+      state.panelPosition = null;
+      panel.style.left = '';
+      panel.style.top = '';
+      panel.style.right = '';
       panel.classList.toggle('is-left', state.dock === 'left');
-      savePrefs({ dock: state.dock });
+      savePrefs({ dock: state.dock, panelPosition: null });
     };
     const tools = $('.sl-tools', panel);
     const main = $('.sl-main', panel);

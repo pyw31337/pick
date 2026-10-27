@@ -12,11 +12,11 @@ function toBase64(buffer) {
   return btoa(binary);
 }
 
-async function fetchMedia(url) {
+async function fetchMedia(url, referer = '') {
   const errors = [];
   for (const credentials of ['omit', 'include']) {
     try {
-      const response = await fetch(url, { credentials, redirect: 'follow', cache: 'force-cache', mode: 'cors' });
+      const response = await fetch(url, { credentials, redirect: 'follow', cache: 'force-cache', mode: 'cors', referrer: referer || undefined, referrerPolicy: 'strict-origin-when-cross-origin' });
       if (!response.ok) {
         errors.push(`${credentials}:${response.status}`);
         continue;
@@ -37,7 +37,7 @@ async function fetchMedia(url) {
 
 const metaCache = new Map();
 
-async function resourceMeta(url) {
+async function resourceMeta(url, referer = '') {
   if (metaCache.has(url)) return metaCache.get(url);
   let size = null, mime = '';
   const read = response => {
@@ -49,13 +49,13 @@ async function resourceMeta(url) {
     else if (response.status === 200 && Number.isFinite(len) && len > 0) size = len;
   };
   try {
-    const head = await fetch(url, { method: 'HEAD', credentials: 'omit', redirect: 'follow', cache: 'force-cache' });
+    const head = await fetch(url, { method: 'HEAD', credentials: 'include', redirect: 'follow', cache: 'no-store', referrer: referer || undefined, referrerPolicy: 'strict-origin-when-cross-origin' });
     if (head.ok) read(head);
   } catch { /* try range */ }
   if (!size) {
     try {
       const controller = new AbortController();
-      const response = await fetch(url, { headers: { Range: 'bytes=0-0' }, credentials: 'omit', redirect: 'follow', signal: controller.signal });
+      const response = await fetch(url, { headers: { Range: 'bytes=0-0' }, credentials: 'include', redirect: 'follow', signal: controller.signal, referrer: referer || undefined, referrerPolicy: 'strict-origin-when-cross-origin' });
       if (response.ok) read(response);
       controller.abort();
     } catch { /* ignore */ }
@@ -221,7 +221,9 @@ if (chrome.webRequest?.onBeforeRequest) {
 chrome.tabs.onRemoved.addListener(tabId => { requestsByTab.delete(tabId); forgetTabMedia(tabId); });
 
 // ---------------------------------------------------------------- per-tab video sources (survive SW restarts)
-const MEDIA_NOISE = /googlevideo\.com|\/videoplayback|bytestart=|byteend=|[?&]range=|\.m4s(?:$|[?#])|\.ts(?:$|[?#])|\.aac(?:$|[?#])|\.m4a(?:$|[?#])|fbcdn\.net|cdninstagram\.com|init\.mp4/i;
+const MEDIA_CDN = /(?:googlevideo\.com|fbcdn\.net|cdninstagram\.com|tiktokcdn\.com)/i;
+const MEDIA_SEGMENT = /bytestart=|byteend=|[?&](?:range|sq|segment|chunk|part)=|\.m4s(?:$|[?#])|\.ts(?:$|[?#])|\.aac(?:$|[?#])|\.m4a(?:$|[?#])|init\.mp4/i;
+const MEDIA_NOISE = url => MEDIA_SEGMENT.test(url) || (MEDIA_CDN.test(url) && /[?&](?:range|sq|segment|chunk|part)=/i.test(url));
 const tabMediaCache = new Map();
 function mediaKey(tabId) { return `tm:${tabId}`; }
 async function getTabMedia(tabId) {
@@ -261,7 +263,7 @@ if (chrome.webRequest?.onHeadersReceived) {
       return;
     }
     // Whole files are played by the <video> element itself ("media"); fetch/XHR video responses are stream pieces.
-    if (details.type !== 'media' || !/^video\//.test(ct) || MEDIA_NOISE.test(url) || (details.statusCode === 206 && !header('content-range'))) return;
+    if (details.type !== 'media' || !/^video\//.test(ct) || MEDIA_NOISE(url) || (details.statusCode === 206 && !header('content-range'))) return;
     const range = /\/(\d+)\s*$/.exec(header('content-range'));
     const size = range ? Number(range[1]) : Number(header('content-length')) || 0;
     if (size && size < 200_000) return;
@@ -269,11 +271,11 @@ if (chrome.webRequest?.onHeadersReceived) {
   }, { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'other'] }, ['responseHeaders']);
 }
 
-async function fetchText(url) {
+async function fetchText(url, referer = '') {
   const errors = [];
   for (const credentials of ['omit', 'include']) {
     try {
-      const res = await fetch(url, { credentials, redirect: 'follow', cache: 'no-store' });
+      const res = await fetch(url, { credentials, redirect: 'follow', cache: 'no-store', referrer: referer || undefined, referrerPolicy: 'strict-origin-when-cross-origin' });
       if (!res.ok) { errors.push(res.status); continue; }
       return { text: await res.text(), url: res.url || url };
     } catch (e) { errors.push(String(e)); }
@@ -299,7 +301,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'probeManifest') {
     (async () => {
       try {
-        const { text, url } = await fetchText(message.url);
+        const { text, url } = await fetchText(message.url, message.referer || sender.tab?.url || '');
         sendResponse({ ...MT.summarize(text, url), url: message.url });
       } catch (error) {
         sendResponse({ error: String(error.message || error) });
@@ -326,7 +328,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'resourceMeta') {
     (async () => {
       try {
-        sendResponse(await resourceMeta(message.url));
+        sendResponse(await resourceMeta(message.url, message.referer || sender.tab?.url || ''));
       } catch { sendResponse({ size: null, mime: '' }); }
     })();
     return true;
@@ -334,7 +336,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'fetchResource') {
     (async () => {
       try {
-        const { buffer, mime } = await fetchMedia(message.url);
+        const { buffer, mime } = await fetchMedia(message.url, message.referer || sender.tab?.url || '');
         sendResponse({ base64: toBase64(buffer), mime, size: buffer.byteLength });
       } catch (error) {
         sendResponse({ error: String(error) });
@@ -352,7 +354,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             mime: 'image/svg+xml'
           };
         } else {
-          source = await fetchMedia(message.url);
+          source = await fetchMedia(message.url, message.referer || sender.tab?.url || '');
         }
         const converted = await convertBuffer(source.buffer, source.mime, message.mime || 'image/jpeg');
         const result = await downloadBase64(converted.mime, toBase64(converted.buffer), message.filename);
@@ -376,7 +378,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               continue;
             }
             if (!item.url || !/^https?:|^data:/i.test(item.url)) continue;
-            const { buffer } = await fetchMedia(item.url);
+            const { buffer } = await fetchMedia(item.url, message.referer || sender.tab?.url || '');
             files.push({ name, bytes: new Uint8Array(buffer) });
           } catch { /* skip one */ }
         }
