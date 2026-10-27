@@ -1,0 +1,680 @@
+const api = globalThis.chrome;
+const SL = globalThis.SourceLens;
+const $ = s => document.querySelector(s);
+const POPUP_ICONS = {
+  save: '<path fill="currentColor" d="M5 21h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2M8.5 7c.83 0 1.5.67 1.5 1.5S9.33 10 8.5 10 7 9.33 7 8.5 7.67 7 8.5 7M5 17.41l3-3l1.29 1.29c.39.39 1.02.39 1.41 0l5.29-5.29l3 3V19H5v-1.59Z"/>',
+  copy: '<g fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"><path d="M7 9v6a4 4 0 0 0 4 4h4a2 2 0 0 1-2 2H6a4 4 0 0 1-4-4V9a4 4 0 0 1 4-4h1z"/><path d="M13 3.054V7H9.2a2 2 0 0 1 .281-.432l2.46-2.87A2 2 0 0 1 13 3.054M15 3v4a2 2 0 0 1-2 2H9v6a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></g>',
+  open: '<path fill="currentColor" d="M480 96c35.3 0 64 28.7 64 64v320c0 35.3-28.7 64-64 64H160c-35.3 0-64-28.7-64-64V160c0-35.3 28.7-64 64-64zM264 224c-9.7 0-18.5 5.8-22.2 14.8s-1.7 19.3 5.2 26.2l35 35l-67 67c-9.4 9.4-9.4 24.6 0 33.9l24 24c9.4 9.4 24.6 9.4 33.9 0l67-67l35 35c6.9 6.9 17.2 8.9 26.2 5.2S416 385.7 416 376V248c0-13.3-10.7-24-24-24z"/>',
+  video: '<path d="M4 6h16a3 3 0 0 1 3 3v2l6-4v18l-6-4v2a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3Z"/><path d="m12 11 7 5-7 5v-10Z" fill="#1c1c1c"/>',
+  code: '<path d="m12 5 3 3-6 6 6 6-3 3-9-9 9-9Zm8 0 9 9-9 9-3-3 6-6-6-6 3-3Z"/>',
+  zip: '<path fill="currentColor" d="M15 15h2v2h-2z"/><path fill="currentColor" d="M20 4h-4v2h2v2h-2v2h2v8h-4v-6h2v-2h-2V8h2V6h-2V4h-2.59L10 2.59C9.63 2.22 9.11 2 8.59 2H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6a2 2 0 0 0-2-2"/>',
+  list: '<path fill="currentColor" d="M3 6.25A3.25 3.25 0 0 1 6.25 3h9.5A3.25 3.25 0 0 1 19 6.25v9.5A3.25 3.25 0 0 1 15.75 19h-9.5A3.25 3.25 0 0 1 3 15.75zm12.28 2.78a.75.75 0 0 0-1.06-1.06L10 12.19l-1.97-1.97a.75.75 0 1 0-1.06 1.06l2.5 2.5a.75.75 0 0 0 1.06 0zM6.5 20a3.25 3.25 0 0 0 2.741 1.5h7.005a5.254 5.254 0 0 0 5.254-5.254V9.241A3.25 3.25 0 0 0 19.999 6.5v9.746A3.753 3.753 0 0 1 16.246 20z"/>'
+};
+function popupIcon(name) { return `<svg class="btn-icon filled-icon" viewBox="${name === 'open' ? '0 0 640 640' : '0 0 32 32'}" aria-hidden="true">${POPUP_ICONS[name] || POPUP_ICONS.list}</svg>`; }
+function setButtonText(button, text) {
+  if (!button) return;
+  const label = button.querySelector?.('.btn-label');
+  if (label) label.textContent = text; else button.textContent = text;
+}
+const state = {
+  tab: null,
+  data: { images: [], videos: [], svgs: [], fonts: [] },
+  view: 'images',
+  query: '',
+  minPx: 0,
+  selected: new Set(),
+  host: '',
+  videoLocked: false,
+  multiTab: false
+};
+
+const popupFontFaces = new Map();
+function popupFontFamily(item) {
+  const source = String(item?.url || item?.family || 'font');
+  let hash = 0;
+  for (let i = 0; i < source.length; i += 1) hash = ((hash << 5) - hash + source.charCodeAt(i)) | 0;
+  const family = `LetsPickPopup${Math.abs(hash)}`;
+  if (!popupFontFaces.has(source)) {
+    popupFontFaces.set(source, family);
+    try {
+      if (typeof FontFace === 'function' && item?.url) {
+        const url = String(item.url).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        new FontFace(family, `url("${url}")`, { weight: item.weight || 'normal', style: item.style || 'normal' }).load().then(face => document.fonts.add(face)).catch(() => {});
+      }
+    } catch { /* fall back to the system face */ }
+  }
+  return family;
+}
+
+function setStatus(text, kind) {
+  const el = $('#status');
+  el.textContent = text || '';
+  el.className = kind === 'error' ? 'error' : '';
+}
+
+function savePrefs(patch) {
+  api.storage.local.get('slPrefs', data => api.storage.local.set({ slPrefs: { ...(data.slPrefs || {}), ...patch } }));
+}
+
+function activeTab() {
+  return new Promise(resolve => api.tabs.query({ active: true, currentWindow: true }, tabs => resolve(tabs[0])));
+}
+
+function tabById(id) {
+  if (!Number.isInteger(id)) return Promise.resolve(null);
+  return new Promise(resolve => api.tabs.get(id, tab => resolve(api.runtime.lastError ? null : tab)));
+}
+
+function exec(tabId, details) {
+  return new Promise(resolve => {
+    api.scripting.executeScript({ target: { tabId, allFrames: true }, ...details }, results => {
+      resolve({ results: results || [], error: api.runtime.lastError?.message || '' });
+    });
+  });
+}
+
+const listInFrame = () => (typeof window.__sourceLensList === 'function' ? window.__sourceLensList() : null);
+
+async function collect(tab) {
+  let run = await exec(tab.id, { func: listInFrame });
+  if (run.error && !run.results.length) throw new Error(run.error);
+  if (!run.results.some(r => r && r.result)) {
+    // Tab was opened before the extension was (re)loaded: inject the scripts now.
+    await exec(tab.id, { files: ['inject-main.js', 'shared.js', 'platform-profiles.js', 'extractors.js'], world: 'MAIN' });
+    await exec(tab.id, { files: ['shared.js', 'platform-profiles.js', 'media-tools.js', 'video-finder.js', 'content.js'] });
+    await new Promise(r => setTimeout(r, 250));
+    run = await exec(tab.id, { func: listInFrame });
+  }
+  const merged = { images: [], videos: [], svgs: [], fonts: [] };
+  const seen = new Set();
+  let videoLocked = false;
+  run.results.forEach(r => {
+    const res = r && r.result;
+    if (!res) return;
+    if (res.top) videoLocked = !!res.videoLocked;
+    ['images', 'videos', 'svgs', 'fonts'].forEach(kind => (res[kind] || []).forEach(item => {
+      item = { ...item, tabId: tab.id, pageUrl: tab.url, pageTitle: tab.title || '', host: (() => { try { return new URL(tab.url).hostname; } catch { return ''; } })() };
+      if (kind === 'videos') item = { ...item, frameId: r.frameId };
+      const key = kind === 'videos'
+        ? `v:${item.kind}:${item.url || (item.job && (item.job.url || (item.job.xml || '').slice(0, 300))) || `${r.frameId}:${item.vid}`}`
+        : `${kind}:${item.type === 'svg' && item.code ? item.code.slice(0, 400) : item.url}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      merged[kind].push({ ...item, frame: res.top ? 'top' : 'frame' });
+    }));
+  });
+  merged.images.sort((a, b) => (b.px || 0) - (a.px || 0));
+  return { ...merged, videoLocked };
+}
+
+async function collectOpenTabs() {
+  const tabs = await new Promise(resolve => api.tabs.query({ currentWindow: true }, resolve));
+  const pages = (tabs || []).filter(tab => /^https?:/i.test(tab.url || ''));
+  const merged = { images: [], videos: [], svgs: [], fonts: [] };
+  const seen = new Set();
+  const errors = [];
+  for (const tab of pages) {
+    try {
+      const data = await collect(tab);
+      ['images', 'videos', 'svgs', 'fonts'].forEach(kind => (data[kind] || []).forEach(item => {
+        const key = `${kind}:${keyOf(item)}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        merged[kind].push(item);
+      }));
+    } catch (error) {
+      errors.push(`${tab.title || tab.url}: ${error.message || error}`);
+    }
+  }
+  merged.images.sort((a, b) => (b.px || 0) - (a.px || 0));
+  return { ...merged, videoLocked: false, pages: pages.length, errors };
+}
+
+function rememberPopupHistory(tab, data) {
+  if (!tab?.url || !/^https?:/i.test(tab.url)) return;
+  const row = {
+    page: tab.url,
+    title: (tab.title || '').slice(0, 100),
+    host: (() => { try { return new URL(tab.url).hostname.replace(/^www\./, ''); } catch { return ''; } })(),
+    ts: Date.now(),
+    items: ['images', 'videos', 'svgs', 'fonts'].flatMap(kind => (data[kind] || []).slice(0, 3).map(item => ({ url: item.url, type: item.type, name: item.name || item.source || '' })))
+  };
+  api.storage.local.get('slHistory', saved => {
+    const list = [row, ...(saved.slHistory || []).filter(item => item.page !== row.page)].slice(0, 20);
+    api.storage.local.set({ slHistory: list });
+  });
+}
+
+function visible() {
+  let list = state.data[state.view] || [];
+  if (state.view === 'images' && state.minPx) list = list.filter(i => (i.px || 0) >= state.minPx);
+  const q = state.query.trim().toLowerCase();
+  if (q) {
+    const words = q.split(/\s+/);
+    list = list.filter(i => {
+      const hay = `${i.name || ''} ${/^data:/i.test(i.url || '') ? '' : i.url} ${i.source || ''} ${i.note || ''} ${i.quality || ''}`.toLowerCase();
+      return words.every(w => hay.includes(w));
+    });
+  }
+  return list;
+}
+
+function keyOf(item) {
+  if (item.kind) return `v:${item.kind}:${item.url || item.job?.url || item.quality}:${item.frameId}:${item.vid}`;
+  return `${item.type}:${item.type === 'svg' && item.code ? item.code.slice(0, 400) : item.url}`;
+}
+
+function targets() {
+  const list = visible();
+  const chosen = list.filter(i => state.selected.has(keyOf(i)));
+  return { list: chosen.length ? chosen : list, chosen: chosen.length };
+}
+
+function updateFooter() {
+  const list = visible();
+  const { chosen } = targets();
+  const n = chosen || list.length;
+  setButtonText($('#download'), `저장 (${n})`);
+  setButtonText($('#zip'), `ZIP (${Math.min(n, 40)})`);
+  $('#zip').hidden = state.view === 'videos';
+  setButtonText($('#copy'), state.view === 'svgs' ? `코드 복사 (${n})` : `URL 복사 (${n})`);
+  setButtonText($('#meta'), `메타 CSV (${n})`);
+  ['#download', '#zip', '#copy', '#meta'].forEach(sel => { $(sel).disabled = !list.length; });
+  const all = $('#selectAll');
+  all.checked = list.length > 0 && chosen === list.length;
+  all.indeterminate = chosen > 0 && chosen < list.length;
+  $('#count').textContent = chosen ? `${chosen}개 선택됨 / ${list.length}개` : `${list.length}개 · 고르지 않으면 전체 처리`;
+}
+
+function emptyMessage() {
+  if (state.query.trim()) return `「${state.query.trim()}」에 맞는 항목이 없습니다.`;
+  if (state.view === 'videos') {
+    return '찾은 영상이 없습니다. 영상을 한 번 재생한 뒤(인스타·페북은 영상을 화면에 띄운 뒤) ↻ 를 눌러 보세요.';
+  }
+  if (state.view === 'images' && state.minPx && (state.data.images || []).length) return `${state.minPx}px 이상 이미지가 없습니다. 크기 필터를 「모든 크기」로 바꿔 보세요.`;
+  if (state.view === 'svgs') return '찾은 SVG가 없습니다.';
+  if (state.view === 'fonts') return '페이지에서 @font-face 글꼴을 찾지 못했습니다.';
+  return '찾은 이미지가 없습니다. 페이지를 아래로 스크롤해 이미지를 불러온 뒤 ↻ 를 눌러 보세요.';
+}
+
+function thumb(item) {
+  if (item.type === 'video') {
+    if (item.poster) {
+      const img = document.createElement('img');
+      img.className = 'thumb video-thumb';
+      img.src = item.poster;
+      img.alt = item.title || item.source || '영상 썸네일';
+      img.loading = 'lazy';
+      img.referrerPolicy = 'no-referrer-when-downgrade';
+      img.onerror = () => { img.remove(); };
+      return img;
+    }
+    const box = document.createElement('div');
+    box.className = 'thumb video-thumb';
+    box.textContent = item.temporary ? '▶ 세션 영상' : item.stream ? '▶ 스트림' : '▶ 영상';
+    return box;
+  }
+  if (item.type === 'font') {
+    const box = document.createElement('div');
+    box.className = 'thumb font-thumb';
+    const strong = document.createElement('strong');
+    const family = popupFontFamily(item);
+    strong.style.fontFamily = `"${family}", ${item.family ? `"${item.family}"` : 'inherit'}`;
+    strong.textContent = '다람쥐 헌 쳇바퀴';
+    const small = document.createElement('small');
+    small.style.fontFamily = `"${family}", ${item.family ? `"${item.family}"` : 'inherit'}`;
+    small.textContent = `The quick brown fox · ${item.family || item.format || SL.extOf(item.url, 'font')}`;
+    box.append(strong, small);
+    return box;
+  }
+  const img = document.createElement('img');
+  img.className = `thumb${item.type === 'svg' ? ' svg-thumb' : ''}`;
+  img.loading = 'lazy';
+  img.alt = '';
+  img.referrerPolicy = 'no-referrer-when-downgrade';
+  img.src = item.type === 'svg' && item.code
+    ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(item.code)}`
+    : item.url;
+  img.onerror = () => {
+    const box = document.createElement('div');
+    box.className = 'thumb broken';
+    box.textContent = '미리보기 없음';
+    img.replaceWith(box);
+  };
+  return img;
+}
+
+function render() {
+  const listEl = $('#list');
+  listEl.textContent = '';
+  ['images', 'videos', 'svgs', 'fonts'].forEach(kind => {
+    $(`#n-${kind}`).textContent = kind === 'videos' ? state.data.videos.filter(v => v.kind !== 'drm').length : state.data[kind].length;
+  });
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === state.view));
+  $('#minPx').hidden = state.view !== 'images';
+  const list = visible();
+  if (!list.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty';
+    empty.textContent = emptyMessage();
+    listEl.append(empty);
+    updateFooter();
+    return;
+  }
+  listEl.classList.toggle('vlist', state.view === 'videos');
+  listEl.classList.toggle('font-list', state.view === 'fonts');
+  if (state.view === 'videos') {
+    const help = document.createElement('p');
+    help.className = 'vhelp';
+    help.textContent = '위에서부터 추천 순서입니다. 원본 파일, 스트림 합치기(DASH/HLS), 녹화 순으로 추천합니다.';
+    listEl.append(help);
+    list.forEach(item => listEl.append(videoRow(item)));
+    updateFooter();
+    return;
+  }
+  list.forEach(item => {
+    const key = keyOf(item);
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+    if (state.selected.has(key)) tile.classList.add('checked');
+    tile.title = `${item.name || ''}\n${item.pageTitle || item.host || ''}\n${/^data:/i.test(item.url) ? '(인라인 SVG)' : item.url}\n${item.state || ''}`;
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.className = 'check';
+    box.checked = state.selected.has(key);
+    box.setAttribute('aria-label', '선택');
+    const toggle = on => {
+      if (on) state.selected.add(key); else state.selected.delete(key);
+      box.checked = on;
+      tile.classList.toggle('checked', on);
+      updateFooter();
+    };
+    box.onclick = ev => { ev.stopPropagation(); toggle(box.checked); };
+    tile.onclick = () => toggle(!state.selected.has(key));
+    tile.append(box, thumb(item));
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const dims = item.width && item.height ? `${item.width}×${item.height}` : item.width ? `폭 ${item.width}px` : '';
+    meta.textContent = [dims, item.signed ? '만료 주소' : '', item.frame === 'frame' ? '프레임' : '', state.multiTab ? (item.host || '') : ''].filter(Boolean).join(' · ') || (item.source || '');
+    tile.append(meta);
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const mk = (label, title, fn, icon) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.innerHTML = `${popupIcon(icon)}<span class="btn-label">${SL.esc(label)}</span>`;
+      b.title = title;
+      b.onclick = ev => { ev.stopPropagation(); fn(b); };
+      actions.append(b);
+    };
+    mk('저장', '이 파일 저장', () => saveItems([item]), 'save');
+    mk(item.type === 'svg' ? '코드' : '복사', item.type === 'svg' ? 'SVG 코드 복사' : 'URL 복사', b => copyText(item.type === 'svg' && item.code ? item.code : item.url, b), item.type === 'svg' ? 'code' : 'copy');
+    if (!/^data:|^blob:/i.test(item.url)) mk('열기', '새 탭에서 열기', () => api.tabs.create({ url: item.url, active: false }), 'open');
+    tile.append(actions);
+    listEl.append(tile);
+  });
+  updateFooter();
+}
+
+const fmtClock = s => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+const BTN = { direct: '저장', dash: 'MP4로 받기', hls: 'MP4로 받기', record: '녹화 저장', drm: '저장 불가' };
+
+function videoRow(item) {
+  const key = keyOf(item);
+  const row = document.createElement('div');
+  row.className = `vrow k-${item.kind}${item.playing ? ' playing' : ''}${state.selected.has(key) ? ' checked' : ''}`;
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.className = 'check';
+  box.checked = state.selected.has(key);
+  box.setAttribute('aria-label', '선택');
+  box.onclick = ev => {
+    ev.stopPropagation();
+    if (box.checked) state.selected.add(key); else state.selected.delete(key);
+    row.classList.toggle('checked', box.checked);
+    updateFooter();
+  };
+  const head = document.createElement('div');
+  head.className = 'vhead';
+  const badge = document.createElement('span');
+  badge.className = `vbadge k-${item.kind}`;
+  badge.textContent = item.badge || item.kind;
+  const facts = document.createElement('b');
+  facts.textContent = [item.audioOnly ? '오디오' : item.quality, item.codec, item.audio === true ? '소리 포함' : item.audio === false ? '소리 없음' : '', item.duration ? fmtClock(item.duration) : '', item.playing ? '지금 보는 영상' : '', item.frameId ? '프레임' : ''].filter(Boolean).join(' · ') || item.source || '';
+  head.append(box, badge, facts);
+  const poster = item.poster ? document.createElement('img') : null;
+  if (poster) {
+    poster.className = 'video-row-thumb';
+    poster.src = item.poster;
+    poster.alt = item.title || item.source || '영상 썸네일';
+    poster.loading = 'lazy';
+    poster.referrerPolicy = 'no-referrer-when-downgrade';
+    poster.onerror = () => poster.remove();
+  }
+  const note = document.createElement('p');
+  note.className = 'vnote';
+  note.textContent = item.note || '';
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  const main = document.createElement('button');
+  main.type = 'button';
+  main.className = 'brand';
+  main.innerHTML = `${popupIcon(item.kind === 'record' ? 'video' : 'save')}<span class="btn-label">${SL.esc(BTN[item.kind] || '저장')}</span>`;
+  main.disabled = item.kind === 'drm';
+  main.onclick = () => saveVideo(item, main);
+  actions.append(main);
+  if (item.url) {
+    const c = document.createElement('button');
+    c.type = 'button';
+    c.innerHTML = `${popupIcon('copy')}<span class="btn-label">주소 복사</span>`;
+    c.onclick = () => copyText(item.url, c);
+    actions.append(c);
+  }
+  row.append(...(poster ? [poster] : []), head, note, actions);
+  return row;
+}
+
+async function saveVideo(item, button) {
+  const tab = await tabById(item.tabId) || state.tab || await activeTab();
+  if (item.kind === 'drm') { setStatus(item.note, 'error'); return { ok: false }; }
+  if (item.kind === 'direct') {
+    if (button) setButtonText(button, '확인 중…');
+    const res = await sendMessage({ type: 'downloadUrl', url: item.url, filename: `lets-pick/${item.file || 'video.mp4'}` });
+    if (button) setButtonText(button, res.ok ? '저장됨' : '실패');
+    setStatus(res.ok ? `원본 영상 저장을 시작했습니다 · ${item.file || ''}` : `원본 주소가 거절됐습니다 (${res.error || ''}). 페이지를 새로고침하거나 아래 다른 방법을 써 보세요.`, res.ok ? '' : 'error');
+    return res;
+  }
+  if (item.kind === 'dash' || item.kind === 'hls') {
+    const host = (item.host || state.host).replace(/^www\./, '');
+    const res = await sendMessage({ type: 'mediaJob', tabId: tab?.id, job: { ...item.job, file: item.file, title: item.title, host, quality: 0 } });
+    setStatus(res.ok ? '새 탭에서 받아 하나의 MP4로 합칩니다.' : `시작하지 못했습니다: ${res.error || ''}`, res.ok ? '' : 'error');
+    return res;
+  }
+  // record: runs inside the page so it keeps going after this popup closes
+  return new Promise(resolve => {
+    api.tabs.sendMessage(tab.id, { type: 'recordVideo', vid: item.vid }, { frameId: item.frameId || 0 }, result => {
+      void api.runtime.lastError;
+      result = result || {};
+      if (result.ok) {
+        setStatus(result.mode === 'live' ? '라이브 녹화 중 · 페이지 아래 「지금 저장」을 누르면 저장됩니다.' : '녹화를 시작했습니다. 영상이 끝나면 자동 저장됩니다. 탭을 열어 두세요.');
+        setTimeout(() => window.close(), 1500);
+      } else setStatus(result.error || '녹화를 시작하지 못했습니다.', 'error');
+      resolve(result);
+    });
+  });
+}
+
+async function copyText(text, button) {
+  try {
+    await navigator.clipboard.writeText(text);
+    if (button) {
+      const prev = button.querySelector?.('.btn-label')?.textContent || button.textContent;
+      setButtonText(button, '완료');
+      setTimeout(() => { setButtonText(button, prev); }, 1000);
+    }
+    setStatus('복사했습니다.');
+  } catch (e) {
+    setStatus(`복사하지 못했습니다: ${e.message || e}`, 'error');
+  }
+}
+
+function sendMessage(msg) {
+  return new Promise(resolve => api.runtime.sendMessage(msg, r => { void api.runtime.lastError; resolve(r || {}); }));
+}
+
+async function saveItems(items) {
+  let ok = 0, fail = 0, skipped = 0;
+  if (items.some(i => i.kind)) {
+    const runnable = items.filter(i => i.kind === 'direct' || i.kind === 'dash' || i.kind === 'hls');
+    for (const item of runnable.slice(0, 10)) {
+      const r = await saveVideo(item);
+      if (r && r.ok) ok += 1; else fail += 1;
+    }
+    skipped = items.length - runnable.length;
+    const parts = [`${ok}개 영상 저장을 시작했습니다`];
+    if (fail) parts.push(`${fail}개 실패`);
+    if (skipped) parts.push(`녹화·DRM 항목 ${skipped}개는 각 줄의 버튼을 쓰세요`);
+    setStatus(parts.join(' · '), fail && !ok ? 'error' : '');
+    return;
+  }
+  for (const item of items) {
+    if (item.type === 'video' && (item.temporary || /^blob:/i.test(item.url))) { skipped += 1; continue; }
+    if (item.stream) { skipped += 1; continue; }
+    let res;
+    if (item.type === 'svg' && item.code) {
+      res = await sendMessage({ type: 'downloadUrl', url: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(item.code)}`, filename: `lets-pick/${item.file}` });
+    } else {
+      res = await sendMessage({ type: 'downloadUrl', url: item.url, filename: `lets-pick/${item.file}` });
+    }
+    if (res.ok) ok += 1; else fail += 1;
+    setStatus(`저장 중… ${ok + fail}/${items.length}`);
+  }
+  const parts = [`${ok}개 저장을 시작했습니다`];
+  if (fail) parts.push(`${fail}개 실패`);
+  if (skipped) parts.push(`${skipped}개는 세션/스트림 영상이라 「영상 저장」 버튼을 쓰세요`);
+  setStatus(parts.join(' · '), fail && !ok ? 'error' : '');
+}
+
+async function load() {
+  setStatus('');
+  $('#count').textContent = '찾는 중…';
+  const tab = await activeTab();
+  state.tab = tab;
+  if (!tab) return;
+  let host = '';
+  try { host = new URL(tab.url).hostname; } catch { /* ignore */ }
+  state.host = host;
+  $('#pageHost').textContent = host || '현재 페이지';
+  if (!/^https?:/i.test(tab.url || '')) {
+    state.data = { images: [], videos: [], svgs: [], fonts: [] };
+    render();
+    $('#list').innerHTML = '<p class="empty">이 페이지(브라우저 설정·새 탭·웹스토어 등)는 보안상 확장 프로그램이 분석할 수 없습니다. 일반 웹사이트에서 열어 주세요.</p>';
+    ['#openPanel', '#oneClickVideo', '#designAudit'].forEach(sel => { $(sel).disabled = true; });
+    $('#count').textContent = '';
+    return;
+  }
+  ['#openPanel', '#oneClickVideo', '#designAudit'].forEach(sel => { $(sel).disabled = false; });
+  try {
+    const data = await collect(tab);
+    state.data = data;
+    state.videoLocked = data.videoLocked;
+    const known = new Set(['images', 'videos', 'svgs', 'fonts'].flatMap(k => data[k].map(keyOf)));
+    state.selected.forEach(k => { if (!known.has(k)) state.selected.delete(k); });
+    if (!state.data[state.view].length) {
+      state.view = ['images', 'videos', 'svgs', 'fonts'].find(k => state.data[k].length) || state.view;
+    }
+    state.multiTab = false;
+    rememberPopupHistory(tab, data);
+    render();
+  } catch (error) {
+    state.data = { images: [], videos: [], svgs: [], fonts: [] };
+    render();
+    setStatus(`이 페이지를 읽지 못했습니다. 페이지를 새로고침(Cmd+R / F5)한 뒤 다시 열어 주세요. (${error.message || error})`, 'error');
+  }
+}
+
+$('#refresh').onclick = load;
+$('#collectTabs').onclick = async () => {
+  setStatus('열린 탭을 수집하는 중…');
+  $('#collectTabs').disabled = true;
+  try {
+    const data = await collectOpenTabs();
+    state.data = data;
+    state.multiTab = true;
+    state.host = `${data.pages || 0}개 탭`;
+    $('#pageHost').textContent = state.host;
+    const known = new Set(['images', 'videos', 'svgs', 'fonts'].flatMap(k => data[k].map(keyOf)));
+    state.selected.forEach(k => { if (!known.has(k)) state.selected.delete(k); });
+    state.view = state.data[state.view]?.length ? state.view : (['images', 'videos', 'svgs', 'fonts'].find(k => state.data[k].length) || 'images');
+    render();
+    const note = data.errors?.length ? ` · ${data.errors.length}개 탭은 제한됨` : '';
+    setStatus(`${data.pages || 0}개 탭에서 자산을 모았습니다${note}`, data.errors?.length === data.pages ? 'error' : '');
+  } catch (error) {
+    setStatus(`탭을 수집하지 못했습니다: ${error.message || error}`, 'error');
+  } finally {
+    $('#collectTabs').disabled = false;
+  }
+};
+$('#settings').onclick = () => api.runtime.openOptionsPage();
+document.querySelectorAll('.tabs button').forEach(btn => {
+  btn.onclick = () => {
+    state.view = btn.dataset.tab;
+    state.selected.clear();
+    render();
+  };
+});
+$('#search').oninput = e => { state.query = e.target.value; render(); };
+$('#minPx').onchange = e => { state.minPx = Number(e.target.value) || 0; savePrefs({ minPx: state.minPx }); render(); };
+$('#selectAll').onchange = e => {
+  visible().forEach(i => (e.target.checked ? state.selected.add(keyOf(i)) : state.selected.delete(keyOf(i))));
+  render();
+};
+$('#copy').onclick = () => {
+  const { list } = targets();
+  if (state.view === 'svgs') {
+    const codes = list.map(i => i.code).filter(Boolean);
+    if (!codes.length) return setStatus('복사할 SVG 코드가 없습니다.', 'error');
+    return copyText(codes.join('\n\n'));
+  }
+  const urls = list.map(i => i.url).filter(u => u && !/^data:/i.test(u));
+  if (!urls.length) return setStatus('복사할 URL이 없습니다.', 'error');
+  copyText(urls.join('\n')).then(() => setStatus(`${urls.length}개 URL을 복사했습니다.`));
+};
+$('#meta').onclick = () => {
+  const { list } = targets();
+  if (!list.length) return;
+  const csvCell = value => `"${String(value ?? '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
+  const rows = [['번호', '종류', '파일명', '원본 URL', '가로', '세로', '포맷', '용량', '상태', '출처']];
+  list.forEach((item, index) => rows.push([
+    index + 1, item.type || (item.kind ? 'video' : ''), item.file || item.name || 'media', item.url || '',
+    item.width || '', item.height || '', item.mime || item.ext || item.type || '',
+    item.size ? `${Math.round(item.size / 1024)} KB` : '', item.state || item.note || '', item.source || ''
+  ]));
+  const csv = '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n');
+  api.downloads.download({
+    url: `data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`,
+    filename: `lets-pick/${(state.host || 'page').replace(/^www\./, '')}-metadata.csv`,
+    saveAs: false
+  }, id => {
+    const err = api.runtime.lastError;
+    setStatus(err ? `메타데이터를 저장하지 못했습니다: ${err.message}` : `메타데이터 CSV를 저장했습니다 (${list.length}개).`, err ? 'error' : '');
+  });
+};
+$('#download').onclick = () => {
+  const { list } = targets();
+  if (!list.length) return;
+  saveItems(list);
+};
+$('#zip').onclick = () => {
+  const { list } = targets();
+  if (!list.length) return;
+  const items = list.slice(0, 40);
+  setStatus(`ZIP 만드는 중… (${items.length}개)`);
+  $('#zip').disabled = true;
+  api.runtime.sendMessage({
+    type: 'zipDownload',
+    items: items.map((x, i) => ({
+      url: x.type === 'svg' && x.code ? '' : x.url,
+      code: x.type === 'svg' ? (x.code || '') : '',
+      name: `${x.kind ? 'video' : x.type === 'svg' ? 'svg' : x.type === 'font' ? 'font' : x.type === 'video' ? 'video' : 'image'}/${String(i + 1).padStart(2, '0')}-${x.file || 'media'}`
+    })),
+    filename: `lets-pick/${(state.host || 'page').replace(/^www\./, '')}-media.zip`
+  }, result => {
+    void api.runtime.lastError;
+    $('#zip').disabled = false;
+    if (result?.ok) setStatus(`ZIP에 ${result.count}개를 담아 저장했습니다${list.length > 40 ? ' (최대 40개)' : ''}.`);
+    else setStatus(result?.error || 'ZIP을 만들지 못했습니다. 「저장」으로 하나씩 받아 보세요.', 'error');
+  });
+};
+$('#openPanel').onclick = async () => {
+  const tab = state.tab || await activeTab();
+  if (!tab) return;
+  const tabName = state.view === 'svgs' ? 'svg' : state.view === 'fonts' ? 'font' : ({ images: 'image', videos: 'video' }[state.view]);
+  api.tabs.sendMessage(tab.id, { type: 'openPanel', tab: tabName }, { frameId: 0 }, () => {
+    if (api.runtime.lastError) {
+      setStatus('페이지에 연결하지 못했습니다. 페이지를 새로고침한 뒤 다시 눌러 주세요.', 'error');
+      return;
+    }
+    window.close();
+  });
+};
+$('#designAudit').onclick = async () => {
+  const tab = state.tab || await activeTab();
+  if (!tab) return;
+  api.tabs.sendMessage(tab.id, { type: 'openPanel', tab: 'design' }, { frameId: 0 }, () => {
+    if (api.runtime.lastError) {
+      setStatus('페이지에 연결하지 못했습니다. 페이지를 새로고침한 뒤 다시 눌러 주세요.', 'error');
+      return;
+    }
+    window.close();
+  });
+};
+$('#oneClickVideo').onclick = async () => {
+  const tab = state.tab || await activeTab();
+  if (!tab) return;
+  setStatus('영상 저장 준비 중…');
+  api.tabs.sendMessage(tab.id, { type: 'oneClickVideo' }, { frameId: 0 }, result => {
+    void api.runtime.lastError;
+    result = result || {};
+    if (result.ok && result.mode === 'file') setStatus('원본 영상 파일 저장을 시작했습니다.');
+    else if (result.ok && result.mode === 'stream') setStatus('새 탭에서 영상을 받아 하나의 MP4로 합칩니다.');
+    else if (result.mode === 'drm') setStatus(result.error || 'DRM 보호 영상이라 저장할 수 없습니다.', 'error');
+    else if (result.ok && result.mode === 'stop') setStatus('녹화를 멈추고 저장합니다.');
+    else if (result.ok && result.mode === 'blob') setStatus('영상을 저장했습니다.');
+    else if (result.ok && result.mode === 'live') setStatus('라이브 녹화 중입니다. 페이지 아래 초록 바를 누르면 저장됩니다.');
+    else if (result.ok && result.mode === 'image') setStatus('영상이 아니라 이미지라서 이미지로 저장했습니다.');
+    else if (result.ok) setStatus('재생이 끝나면 자동으로 저장됩니다. 이 탭을 닫지 마세요.');
+    else setStatus(result.error || '영상을 찾지 못했습니다. 영상을 재생한 뒤 다시 눌러 주세요.', 'error');
+  });
+};
+
+document.addEventListener('keydown', ev => {
+  if (ev.key === '/' && document.activeElement !== $('#search')) {
+    ev.preventDefault();
+    $('#search').focus();
+  }
+});
+
+function loadHistory() {
+  api.storage.local.get('slHistory', data => {
+    const box = $('#history');
+    box.textContent = '';
+    const rows = (data.slHistory || []).slice(0, 8);
+    if (!rows.length) {
+      box.innerHTML = '<p class="empty small">아직 기록이 없습니다.</p>';
+      return;
+    }
+    rows.forEach(row => {
+      if (!/^https?:/i.test(row.page || '')) return;
+      const a = document.createElement('a');
+      a.className = 'hist';
+      a.href = row.page;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      const b = document.createElement('b');
+      b.textContent = row.title || row.host;
+      const span = document.createElement('span');
+      span.textContent = `${row.host} · ${(row.items || []).length}개 · ${new Date(row.ts).toLocaleString()}`;
+      a.append(b, span);
+      box.append(a);
+    });
+  });
+}
+
+function loadShortcutLabel() {
+  if (!api.commands?.getAll) return;
+  api.commands.getAll(cmds => {
+    const panel = cmds.find(c => c.name === 'open-panel');
+    $('#panelKey').textContent = panel?.shortcut || '';
+    $('#panelKey').hidden = !panel?.shortcut;
+  });
+}
+
+$('#ver').textContent = api.runtime.getManifest().version;
+api.storage.local.get('slPrefs', data => {
+  state.minPx = Number(data.slPrefs?.minPx) || 0;
+  $('#minPx').value = String(state.minPx);
+  load();
+});
+loadHistory();
+loadShortcutLabel();

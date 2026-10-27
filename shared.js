@@ -1,0 +1,368 @@
+(function (root) {
+  const SL = root.SourceLens = root.SourceLens || {};
+
+  SL.MEDIA_EXT = /\.(?:mp4|m4v|mov|webm|mkv|ogv|avi|3gp|m3u8|mpd|ts|m4s|mp3|m4a|wav|ogg|oga|aac|flac)(?:$|[?#])/i;
+  SL.FONT_EXT = /\.(?:woff2?|ttf|otf|eot)(?:$|[?#])/i;
+  SL.FONT_MIME = /^(?:font\/|application\/(?:font|x-font|vnd\.ms-fontobject))/i;
+  SL.IMAGE_EXT = /\.(?:jpe?g|png|gif|webp|avif|bmp|svg|ico|jfif|heic)(?:$|[?#])/i;
+  SL.PHOTO_EXT = /\.(?:jpe?g|png|webp|avif|bmp|jfif|heic)(?:$|[?#])/i;
+  SL.SIGNED = /(?:X-Amz-Signature|X-Amz-Expires|X-Amz-Credential|Key-Pair-Id|Policy=|Signature=|Expires=|oh=|oe=|_nc_ohc|_nc_ht|_nc_sid|expire=|exp=)/i;
+
+  SL.abs = function abs(value, base) {
+
+    if (!value || typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === '#') return '';
+    if (/^(?:javascript|vbscript|file|chrome|about):/i.test(trimmed)) return '';
+    if (/^data:/i.test(trimmed) && !/^data:image\/(?:svg|png|jpe?g|webp)/i.test(trimmed)) return '';
+    try {
+      const url = new URL(trimmed, base || (typeof location !== 'undefined' ? location.href : 'https://example.com/'));
+      if (/^(javascript|vbscript|file|chrome|about):/i.test(url.protocol)) return '';
+      return url.href;
+    } catch {
+      return '';
+    }
+  };
+
+  SL.unique = function unique(values) {
+    return [...new Set((values || []).filter(Boolean))];
+  };
+
+  SL.esc = function esc(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+  };
+
+  SL.bytes = function bytes(value) {
+    if (!Number.isFinite(value) || value <= 0) return '';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let n = value, i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return `${n >= 10 || i === 0 ? n.toFixed(0) : n.toFixed(1)} ${units[i]}`;
+  };
+
+  SL.unwrapMediaUrl = function unwrapMediaUrl(url) {
+    if (!url || typeof url !== 'string') return url;
+    let current = url.trim();
+    for (let i = 0; i < 4; i++) {
+      try {
+        const u = new URL(current, typeof location !== 'undefined' ? location.href : 'https://example.com/');
+        let inner = '';
+        for (const key of ['url', 'fname', 'src', 'image', 'image_url', 'img', 'file', 'q']) {
+          const v = u.searchParams.get(key);
+          if (v && /^https?:/i.test(v)) { inner = v; break; }
+        }
+        if (!inner) {
+          const embedded = current.match(/\/optimize\/[^/\s]+\/(https?:\/\/\S+)/i);
+          if (embedded) inner = embedded[1];
+        }
+        if (!inner || inner === current) break;
+        current = inner;
+      } catch {
+        break;
+      }
+    }
+    return current;
+  };
+
+  SL.URL_LOCK = [
+    /cdninstagram\.com/i,
+    /(?:^|\.)fbcdn\.net/i,
+    /scontent/i,
+    /tiktokcdn/i,
+    /muscdn\.com/i,
+    /bytevod/i,
+    /googlevideo\.com/i,
+    /shop-phinf\.pstatic\.net/i,
+    /shopping-phinf/i,
+    /dthumb-phinf\.pstatic\.net/i,
+    /imgnews\.pstatic\.net/i,
+    /ssl\.pstatic\.net/i,
+    /dcimg\d*\.dcinside/i,
+    /viewimage\.php/i,
+    /gdimg\.gmarket\.co\.kr/i,
+    /pic\.auction\.co\.kr/i,
+    /ssgcdn\.com/i,
+    /cdn\.011st\.com/i,
+    /image\.tmon\.co\.kr/i,
+    /lotteimall|lotteon\.com/i,
+    /kakaocdn\.net/i,
+    /daumcdn\.net/i,
+    /i\.vimeocdn\.com/i,
+    /i\.ytimg\.com/i
+  ];
+
+  SL.URL_REWRITE = [
+    {
+      name: 'unsplash',
+      test: /images\.unsplash\.com/i,
+      apply(u) {
+        u.searchParams.set('w', '2400');
+        u.searchParams.set('q', '90');
+        return u.href;
+      }
+    },
+    {
+      name: 'pexels',
+      test: /images\.pexels\.com/i,
+      apply(u) {
+        u.searchParams.set('auto', 'compress');
+        u.searchParams.set('cs', 'tinysrgb');
+        u.searchParams.set('w', '1920');
+        return u.href;
+      }
+    },
+    {
+      name: 'pixabay',
+      test: /pixabay\.com/i,
+      apply(_u, raw) {
+        return raw.replace(/_(\d{2,4})(\.(?:jpe?g|png|webp))/i, (m, n, ext) => Number(n) < 1280 ? `_1280${ext}` : m);
+      }
+    },
+    {
+      name: 'dribbble',
+      test: /cdn\.dribbble\.com|dribbble\.com/i,
+      apply(_u, raw) {
+        return raw.replace(/\/(?:small|teaser|thumbnail)\//i, '/original/').replace(/_teaser/i, '');
+      }
+    },
+    {
+      name: 'behance',
+      test: /behance\.net|mir-s3-cdn-cf\.behance/i,
+      apply(_u, raw) {
+        return raw.replace(/\/fs\/\d+\//, '/fs/source/').replace(/\/[0-9]+x[0-9]+\//, '/');
+      }
+    },
+    {
+      name: 'naver-blog',
+      test: /(?:blogfiles|postfiles|cafefiles)\.pstatic\.net/i,
+      apply(u) {
+        u.searchParams.set('type', 'w966');
+        return u.href;
+      }
+    },
+    {
+      name: 'coupang',
+      test: /coupangcdn|thumbnail.*coupang/i,
+      apply(_u, raw) {
+        return raw.replace(/\/thumbnails\/remote\/\d+x\d+(?:ex)?\//ig, '/thumbnails/remote/1000x1000ex/');
+      }
+    },
+    {
+      name: 'danawa',
+      test: /img\.danawa\.com|danawa\.com/i,
+      apply(_u, raw) {
+        return raw.replace(/\/resize\/\d+x\d+\//i, '/').replace(/_[sml](?=\.)/i, '');
+      }
+    }
+  ];
+
+  SL.upgradeMediaUrl = function upgradeMediaUrl(url) {
+    if (!url || typeof url !== 'string') return url;
+    const unwrapped = SL.unwrapMediaUrl(url);
+    if (!unwrapped) return url;
+    if (SL.SIGNED.test(unwrapped)) return unwrapped;
+    if (SL.URL_LOCK.some(re => re.test(unwrapped))) return unwrapped;
+    try {
+      const parsed = new URL(unwrapped, typeof location !== 'undefined' ? location.href : 'https://example.com/');
+      for (const rule of SL.URL_REWRITE) {
+        if (rule.test.test(unwrapped) || rule.test.test(parsed.hostname)) {
+          return rule.apply(parsed, unwrapped) || unwrapped;
+        }
+      }
+    } catch { /* keep */ }
+    return unwrapped;
+  };
+
+  SL.fileName = function fileName(url) {
+    try {
+      if (/^blob:/i.test(url || '')) return 'session-video';
+      const raw = decodeURIComponent(new URL(url, 'https://x.invalid').pathname.split('/').pop() || 'media');
+      const cleaned = raw.replace(/[\\/:*?"<>|]+/g, '_').replace(/[^a-z0-9._-]+/gi, '_').slice(-80);
+      return cleaned || 'media';
+    } catch {
+      return 'media';
+    }
+  };
+
+  SL.isManifest = function isManifest(url) {
+    return /(?:\.m3u8|\.mpd)(?:$|[?#])/i.test(url || '');
+  };
+
+  SL.isUiJunk = function isUiJunk(url) {
+    if (!url) return true;
+    if (/^data:image\/svg/i.test(url)) return false;
+    if (/rsrc\.php|static\.(?:xx\.)?fbcdn|static\.cdninstagram|instagram\.com\/static|facebook\.com\/rsrc/i.test(url)) return true;
+    if (/facebook\.com\/tr\?|\/tr\?id=|google-analytics|googletagmanager|doubleclick|scorecardresearch|adservice/i.test(url)) return true;
+    if (/nolmg_|noimg|no_image|spacer|pixel\.gif|1x1|clear\.gif/i.test(url)) return true;
+    if (/\/(?:emoticon|emoji|nickcon|wcmt_emot|dccon)\//i.test(url)) return true;
+    if (/\.(?:gif|ico)(?:$|[?#])/i.test(url)) return true;
+    if (/\.svg(?:$|[?#])/i.test(url) && /(?:cdninstagram|fbcdn|instagram\.com|facebook\.com)/i.test(url)) return true;
+    return false;
+  };
+
+  SL.isImageUrl = function isImageUrl(url, mime) {
+    if (mime && /^image\//i.test(mime) && !/^image\/(svg|gif)/i.test(mime)) return true;
+    if (!url || SL.isUiJunk(url)) return false;
+    if (/\.svg(?:$|[?#])/i.test(url)) return false;
+    if (SL.PHOTO_EXT.test(url)) return true;
+    if (/_(?:n|o)\.(?:jpe?g|png|webp)/i.test(url)) return true;
+    if (/[?&]stp=/i.test(url) && !SL.MEDIA_EXT.test(url)) return true;
+    if (/i\.ytimg\.com|ggpht\.com|images\.unsplash|images\.pexels|cdn\.pixabay|cdn\.dribbble|mir-s3-cdn-cf\.behance|i\.vimeocdn/i.test(url)) return true;
+    if (/img\.danawa\.com|img\.enuri\.info|image\.ygosu\.com|file\.ygosu\.com|humoruniv\.com|dcimg\d*\.dcinside|viewimage\.php|namu\.la/i.test(url)) return true;
+    if (/pstatic\.net/i.test(url) && /(?:type=w\d+|phinf|blogfiles|imgnews|shop-phinf|img)/i.test(url) && !/\.(?:js|css)(?:$|[?#])/i.test(url)) return true;
+    if (/t\d\.kakaocdn\.net|kakaocdn\.net\/thumb/i.test(url) && !/\.(?:js|css|mp4)/i.test(url)) return true;
+    return false;
+  };
+
+  SL.isVideoUrl = function isVideoUrl(url, mime) {
+    if (mime && /^video\//i.test(mime)) return true;
+    if (!url) return false;
+    if (SL.isImageUrl(url, mime) || SL.PHOTO_EXT.test(url) || /_n\.(?:jpe?g|png|webp)/i.test(url)) return false;
+    if (SL.MEDIA_EXT.test(url)) return true;
+    if (/googlevideo\.com|videoplayback/i.test(url)) return true;
+    if (/player\.vimeo\.com|vod-progressive|vimeocdn\.com\/.*(?:mp4|m3u8)/i.test(url)) return true;
+
+    if (/tiktokcdn|muscdn\.com|bytevod|tiktok\.com\/aweme/i.test(url)) return true;
+    if (/\.pstatic\.net\/.*(mp4|hls)|tvnaver|kakaocdn\.net.*(?:mp4|m3u8)|daumcdn\.net.*(?:mp4|m3u8)/i.test(url)) return true;
+    if (/\/o1\/v\//i.test(url)) return true;
+    if (/(?:cdninstagram|fbcdn|scontent).*(?:\/t(?:15|16|2|30|35|50|66)\/|\/t2\/f2\/|\/v\/t(?:15|16|2|30|35|50|66)\/)/i.test(url) && !SL.PHOTO_EXT.test(url)) return true;
+    if (/\.mp4(?:$|[?#])/i.test(url)) return true;
+    return false;
+  };
+
+  SL.looksLikeMediaRequest = function looksLikeMediaRequest(url, type, mime) {
+    if (SL.isUiJunk(url)) return false;
+    return SL.isVideoUrl(url, mime) || SL.isImageUrl(url, mime) || SL.isManifest(url);
+  };
+
+  SL.classifyUrl = function classifyUrl(url, hint) {
+    url = url || '';
+    if (hint === 'svg' || /^data:image\/svg/i.test(url)) {
+      return { type: 'svg', flags: [], state: 'SVG', temporary: false, stream: false };
+    }
+    if (hint === 'font' || SL.FONT_EXT.test(url)) {
+      const signed = SL.SIGNED.test(url);
+      return { type: 'font', flags: signed ? ['signed'] : [], state: signed ? '서명·만료 가능 URL' : '글꼴 주소', temporary: false, stream: false };
+    }
+    if (SL.PHOTO_EXT.test(url) || SL.isImageUrl(url) || hint === 'image') {
+      if (!SL.isVideoUrl(url) || SL.PHOTO_EXT.test(url)) {
+        const signed = SL.SIGNED.test(url);
+        return { type: 'image', flags: signed ? ['signed'] : [], state: signed ? '서명·만료 가능 URL' : '직접 열 수 있음', temporary: false, stream: false };
+      }
+    }
+    const type = SL.isVideoUrl(url) || SL.isManifest(url) || (hint === 'video' && !SL.PHOTO_EXT.test(url) && !SL.isImageUrl(url)) ? 'video' : 'image';
+    const flags = [];
+    if (/^blob:/i.test(url)) flags.push('blob');
+    if (SL.isManifest(url)) flags.push('stream');
+    if (SL.SIGNED.test(url)) flags.push('signed');
+    let state = '직접 열 수 있음';
+    if (flags.includes('blob')) state = '세션 종속 (blob)';
+    else if (flags.includes('stream')) state = '스트리밍 매니페스트';
+    else if (flags.includes('signed')) state = '서명·만료 가능 URL';
+    else if (type === 'video') state = '영상 주소';
+    return { type, flags, state, temporary: flags.includes('blob'), stream: flags.includes('stream') };
+  };
+
+  SL.confidenceScore = function confidenceScore(value) {
+    return ({ '최상': 4, '높음': 3, '중간': 2, '낮음': 1 }[value] || 0);
+  };
+
+  SL.youtubeIdFromUrl = function youtubeIdFromUrl(value) {
+    try {
+      const parsed = new URL(value, 'https://youtube.com');
+      const host = parsed.hostname.replace(/^www\./, '');
+      if (host === 'youtu.be') return parsed.pathname.slice(1).split('/')[0].slice(0, 11);
+      const fromPath = parsed.pathname.match(/\/(?:shorts|embed|live|v)\/([\w-]{11})/);
+      if (fromPath) return fromPath[1];
+      const v = parsed.searchParams.get('v');
+      if (v && /^[\w-]{11}$/.test(v)) return v;
+    } catch { /* ignore */ }
+    return '';
+  };
+
+  SL.youtubeThumbs = function youtubeThumbs(id) {
+    if (!id) return [];
+    return ['maxresdefault', 'sddefault', 'hqdefault', 'mqdefault'].map((size, i) => ({
+      url: `https://i.ytimg.com/vi/${id}/${size}.jpg`,
+      source: `YouTube ${size}`,
+      type: 'image',
+      confidence: i === 0 ? '최상' : '높음'
+    }));
+  };
+
+  SL.parseSrcset = function parseSrcset(srcset) {
+    const text = String(srcset || '');
+    const out = [];
+    let i = 0;
+    while (i < text.length) {
+      while (i < text.length && /[\s,]/.test(text[i])) i++;
+      if (i >= text.length) break;
+      let j = i;
+      while (j < text.length && !/\s/.test(text[j])) j++;
+      let url = text.slice(i, j);
+      let desc = '';
+      if (/,+$/.test(url)) {
+        url = url.replace(/,+$/, '');
+      } else {
+        let k = j;
+        while (k < text.length && text[k] !== ',') k++;
+        desc = text.slice(j, k).trim();
+        j = k;
+      }
+      i = j + 1;
+      if (!url) continue;
+      const m = /([\d.]+)\s*([wx])/i.exec(desc);
+      out.push({ url, value: m ? parseFloat(m[1]) : 1, unit: m ? m[2].toLowerCase() : 'x' });
+    }
+    return out;
+  };
+
+  SL.largestSrcset = function largestSrcset(srcset) {
+    let best = '', score = -1;
+    SL.parseSrcset(srcset).forEach(c => {
+      if (c.value >= score) { score = c.value; best = c.url; }
+    });
+    return best;
+  };
+
+  SL.extOf = function extOf(url, type, mime) {
+    const fromMime = {
+      'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/avif': 'avif', 'image/gif': 'gif',
+      'image/svg+xml': 'svg', 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
+      'font/woff': 'woff', 'font/woff2': 'woff2', 'font/ttf': 'ttf', 'font/otf': 'otf',
+      'application/font-woff': 'woff', 'application/vnd.ms-fontobject': 'eot'
+    }[String(mime || '').split(';')[0].toLowerCase()];
+    if (fromMime) return fromMime;
+    if (/^data:image\/svg/i.test(url || '')) return 'svg';
+    try {
+      const path = new URL(url, 'https://x.invalid').pathname;
+      const m = /\.([a-z0-9]{2,5})$/i.exec(path);
+      if (m && /^(?:jpe?g|png|gif|webp|avif|bmp|svg|ico|jfif|heic|mp4|m4v|mov|webm|mkv|ogv|m3u8|mpd|woff2?|ttf|otf|eot)$/i.test(m[1])) {
+        return m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
+      }
+      const fmt = new URL(url, 'https://x.invalid').searchParams.get('format') || new URL(url, 'https://x.invalid').searchParams.get('fm');
+      if (fmt && /^(?:jpe?g|png|webp|avif|gif)$/i.test(fmt)) return fmt.toLowerCase().replace('jpeg', 'jpg');
+    } catch { /* ignore */ }
+    return type === 'svg' ? 'svg' : type === 'video' ? 'mp4' : type === 'font' ? 'woff2' : 'jpg';
+  };
+
+  SL.downloadName = function downloadName(item, host) {
+    const site = String(host || 'web').replace(/^www\./, '');
+    const isData = /^data:/i.test(item?.url || '');
+    let base = isData ? (item?.name || item?.type || 'media') : (SL.fileName(item?.url || '') || item?.type || 'media');
+    base = String(base).replace(/\.[a-z0-9]{2,5}$/i, '');
+    if (/^session-video$/.test(base)) base = 'video';
+    const ext = SL.extOf(item?.url || '', item?.type, item?.mime);
+    return `${site}-${base}`.replace(/[^a-z0-9._-]+/gi, '-').replace(/-+/g, '-').slice(0, 70) + `.${ext}`;
+  };
+
+  SL.isTypingTarget = function isTypingTarget(node) {
+    if (!node || node.nodeType !== 1) return false;
+    if (/^(?:INPUT|TEXTAREA|SELECT)$/.test(node.tagName)) return true;
+    return !!node.isContentEditable;
+  };
+
+  if (typeof module !== 'undefined' && module.exports) module.exports = SL;
+})(typeof globalThis !== 'undefined' ? globalThis : this);

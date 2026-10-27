@@ -1,0 +1,88 @@
+{
+  "manifest_version": 3,
+  "name": "Let's Pick",
+  "short_name": "Let's Pick",
+  "version": "1.4.11",
+  "description": "페이지의 이미지·영상·SVG·글꼴 원본을 찾고, 렌더링된 디자인 토큰과 일관성까지 분석하는 Let's Pick.",
+  "permissions": [
+    "contextMenus",
+    "webRequest",
+    "storage",
+    "scripting",
+    "downloads",
+    "tabs",
+    "activeTab",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "service-worker.js" },
+  "declarative_net_request": {
+    "rule_resources": [
+      { "id": "referer", "enabled": true, "path": "dnr.json" }
+    ]
+  },
+  "action": {
+    "default_title": "Let's Pick — 이미지·영상·SVG 원본 찾기",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png",
+      "48": "icon-48.png",
+      "128": "icon-128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["inject-main.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["shared.js", "platform-profiles.js", "extractors.js"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["shared.js", "platform-profiles.js", "media-tools.js", "video-finder.js", "content.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content.css"],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ],
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "commands": {
+    "inspect-selection": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "마우스가 올라간 이미지·영상 분석 (없으면 페이지 전체 보기)"
+    },
+    "open-panel": {
+      "suggested_key": { "default": "Alt+Shift+D" },
+      "description": "이 페이지의 미디어를 패널로 모두 보기"
+    }
+  },
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png",
+    "256": "icon-256.png",
+    "512": "icon-512.png"
+  }
+}

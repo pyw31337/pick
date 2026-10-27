@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Let's Pick">
+  <defs>
+    <linearGradient id="lp-bg" x1="8" y1="4" x2="120" y2="124" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#18243f"/>
+      <stop offset="1" stop-color="#0b1021"/>
+    </linearGradient>
+    <linearGradient id="lp-accent" x1="22" y1="22" x2="102" y2="106" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#62e6b1"/>
+      <stop offset="1" stop-color="#20b9a3"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="30" fill="url(#lp-bg)"/>
+  <path d="M36 20h56a16 16 0 0 1 16 16v56a16 16 0 0 1-16 16H36a16 16 0 0 1-16-16V36a16 16 0 0 1 16-16Z" fill="none" stroke="#324365" stroke-width="3"/>
+  <path d="M39 43a17 17 0 0 1 30-11l6 7 9-6a10 10 0 0 1 14 3l-6 7 9 6a10 10 0 0 1-7 18l-11-2-13 20a12 12 0 0 1-20 0L37 64a17 17 0 0 1 2-21Z" fill="url(#lp-accent)"/>
+  <path d="m47 56 12 12 25-28" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="92" cy="31" r="7" fill="#ffcf66"/>
+</svg>

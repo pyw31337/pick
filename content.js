@@ -1,0 +1,3517 @@
+(() => {
+  // A copy left behind by an extension update/reload is "dead" (its chrome.* link is gone) but its listeners stay
+  // in the tab. Only skip when the existing copy is alive; otherwise start fresh so Alt(⌥)+click keeps working.
+  if (window.__sourceLensLoaded && typeof window.__sourceLensAlive === 'function' && window.__sourceLensAlive()) return;
+  window.__sourceLensLoaded = true;
+  const alive = () => { try { return !!(chrome.runtime && chrome.runtime.id); } catch { return false; } };
+  window.__sourceLensAlive = alive;
+
+  const SL = globalThis.SourceLens;
+  const VF = window.__slVideo;
+  const MT = globalThis.SourceLensMedia;
+  const state = {
+    panel: null, selected: null, contextTarget: null, selectedMedia: null, picked: null, analysis: null,
+    candidates: [], activeTab: 'selected', designSubtab: 'overview', postUrl: '', capture: null, pageNet: [], design: null,
+    profile: null, observer: null, scanTimer: 0, redraw: null, platformMedia: [],
+    recorder: null, captureTimer: 0, videoItems: [],
+    query: '', minPx: 0, sort: 'big', selectedKeys: new Set(), dock: 'right', altClick: true,
+    lastPoint: null, lightboxItem: null, toastTimer: 0, autoVideo: true,
+    panelPosition: null
+  };
+  const VERSION = (() => { try { return chrome.runtime.getManifest().version; } catch { return ''; } })();
+  const SAVE_MAX = 100;
+  const ZIP_MAX = 40;
+
+  function loadPrefs() {
+    try {
+      chrome.storage.local.get('slPrefs', data => {
+        const p = data?.slPrefs || {};
+        if (p.dock === 'left' || p.dock === 'right') state.dock = p.dock;
+        if (Number.isFinite(p.minPx)) state.minPx = p.minPx;
+        if (p.sort === 'big' || p.sort === 'page') state.sort = p.sort;
+        state.altClick = p.altClick !== false;
+        state.autoVideo = p.autoVideo !== false;
+        if (p.panelPosition && Number.isFinite(p.panelPosition.left) && Number.isFinite(p.panelPosition.top)) {
+          state.panelPosition = { left: p.panelPosition.left, top: p.panelPosition.top };
+          const panel = state.panel?.querySelector('#sl-panel');
+          if (panel) applyPanelPosition(panel);
+        }
+      });
+      chrome.storage.onChanged?.addListener((changes, area) => {
+        if (area !== 'local' || !changes.slPrefs) return;
+        const p = changes.slPrefs.newValue || {};
+        state.altClick = p.altClick !== false;
+        state.autoVideo = p.autoVideo !== false;
+        if (p.panelPosition && Number.isFinite(p.panelPosition.left) && Number.isFinite(p.panelPosition.top)) {
+          state.panelPosition = { left: p.panelPosition.left, top: p.panelPosition.top };
+        } else if (Object.prototype.hasOwnProperty.call(p, 'panelPosition')) {
+          state.panelPosition = null;
+        }
+        const panel = state.panel?.querySelector('#sl-panel');
+        if (panel && state.panelPosition) applyPanelPosition(panel);
+        if (p.dock === 'left' || p.dock === 'right') {
+          state.dock = p.dock;
+          state.panel?.querySelector('#sl-panel')?.classList.toggle('is-left', state.dock === 'left');
+        }
+      });
+    } catch { /* ignore */ }
+  }
+
+  function savePrefs(patch) {
+    try {
+      chrome.storage.local.get('slPrefs', data => {
+        chrome.storage.local.set({ slPrefs: { ...(data?.slPrefs || {}), ...patch } });
+      });
+    } catch { /* ignore */ }
+  }
+  loadPrefs();
+
+  let shadowCache = { t: 0, roots: [] };
+  function shadowRoots() {
+    const now = Date.now();
+    if (now - shadowCache.t < 1500) return shadowCache.roots;
+    const roots = [];
+    const walk = (root, depth) => {
+      if (!root || depth > 6) return;
+      const tw = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+      let node, n = 0;
+      while ((node = tw.nextNode()) && n < 40000) {
+        n += 1;
+        const sr = node.shadowRoot;
+        if (sr && node !== state.host && node.id !== 'sl-host') {
+          roots.push(sr);
+          walk(sr, depth + 1);
+        }
+      }
+    };
+    try { walk(document.documentElement, 0); } catch { /* ignore */ }
+    shadowCache = { t: now, roots };
+    return roots;
+  }
+
+  function deepAll(selector) {
+    const out = [...document.querySelectorAll(selector)];
+    shadowRoots().forEach(root => {
+      try { out.push(...root.querySelectorAll(selector)); } catch { /* ignore */ }
+    });
+    return out.filter(node => !node.closest?.('#sl-host'));
+  }
+
+  let bgCache = { t: 0, items: [] };
+  const canvasCache = new WeakMap();
+  function collectBackgrounds() {
+    const now = Date.now();
+    if (now - bgCache.t < 3000) return bgCache.items;
+    const out = [];
+    const seen = new Set();
+    const start = performance.now();
+    const all = document.body ? document.body.getElementsByTagName('*') : [];
+    const n = Math.min(all.length, 8000);
+    for (let i = 0; i < n; i++) {
+      if ((i & 63) === 0 && performance.now() - start > 50) break;
+      const el = all[i];
+      if (el.id === 'sl-host' || /^(?:IMG|VIDEO|PICTURE|SOURCE|SCRIPT|STYLE|LINK|META|NOSCRIPT|BR)$/i.test(el.tagName) || el instanceof SVGElement) continue;
+      const bg = getComputedStyle(el).backgroundImage;
+      if (!bg || bg === 'none' || bg.indexOf('url(') < 0) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 96 || r.height < 96) continue;
+      const re = /url\(\s*["']?([^"')]+?)["']?\s*\)/g;
+      let m;
+      while ((m = re.exec(bg))) {
+        const u = abs(m[1]);
+        if (!u || seen.has(u) || /^data:/i.test(u) || /\.svg(?:$|[?#])/i.test(u)) continue;
+        seen.add(u);
+        if (isChromeImage(el, u)) continue;
+        const item = candidate(u, '배경 이미지(CSS)', 'image', {
+          confidence: '중간', relation: 'page', width: Math.round(r.width), height: Math.round(r.height)
+        });
+        if (item) out.push(item);
+      }
+      if (out.length >= 80) break;
+    }
+    bgCache = { t: now, items: out };
+    return out;
+  }
+
+  // A page-level design pass inspired by the useful, public-facing part of
+  // Peek's design audit: read the rendered system, not framework internals.
+  // Keep this deliberately bounded so large feeds remain responsive.
+  function analyzeDesignSystem() {
+    const all = deepAll('*');
+    const limit = Math.min(all.length, 9000);
+    const maps = { colors: new Map(), gradients: new Map(), typography: new Map(), spacing: new Map(), radii: new Map(), shadows: new Map() };
+    const components = new Map();
+    const parseColor = value => {
+      const v = String(value || '').trim().toLowerCase();
+      const hex = v.match(/^#([0-9a-f]{3,8})$/i);
+      if (hex) {
+        let h = hex[1]; if (h.length === 3 || h.length === 4) h = h.split('').map(c => c + c).join('');
+        if (h.length >= 6) return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16), h.length >= 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1];
+      }
+      const rgb = v.match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?\s*\)$/i);
+      return rgb ? [Number(rgb[1]), Number(rgb[2]), Number(rgb[3]), rgb[4] == null ? 1 : Number(rgb[4]) > 1 ? Number(rgb[4]) / 255 : Number(rgb[4])] : null;
+    };
+    const contrastRatio = (a, b) => {
+      const lum = color => { const channels = color.slice(0, 3).map(c => { const n = c / 255; return n <= .03928 ? n / 12.92 : ((n + .055) / 1.055) ** 2.4; }); return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2]; };
+      const l1 = lum(a), l2 = lum(b); return (Math.max(l1, l2) + .05) / (Math.min(l1, l2) + .05);
+    };
+    const add = (map, value, extra = {}) => {
+      const v = String(value || '').trim();
+      if (!v || v === 'none' || v === 'normal' || v === 'transparent' || /^rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)$/i.test(v)) return;
+      const key = v.toLowerCase();
+      const row = map.get(key) || { value: v, count: 0, ...extra };
+      row.count += 1;
+      map.set(key, row);
+    };
+    const colorRegex = /(?:rgba?|hsla?|#[0-9a-f]{3,8})/ig;
+    let inspected = 0, contrastChecks = 0, contrastFails = 0;
+    for (let i = 0; i < limit; i += 1) {
+      const el = all[i];
+      if (!el || el.id === 'sl-host' || el.closest?.('#sl-host')) continue;
+      let style;
+      try { style = getComputedStyle(el); } catch { continue; }
+      inspected += 1;
+      add(maps.colors, style.color, { kind: 'text' });
+      add(maps.colors, style.backgroundColor, { kind: 'surface' });
+      ['borderTopColor', 'borderRightColor', 'borderBottomColor', 'borderLeftColor', 'outlineColor'].forEach(prop => add(maps.colors, style[prop], { kind: 'border' }));
+      const bg = style.backgroundImage || '';
+      if (/gradient\(/i.test(bg)) add(maps.gradients, bg);
+      (bg.match(colorRegex) || []).forEach(value => add(maps.colors, value, { kind: 'gradient' }));
+      const type = [style.fontFamily, style.fontSize, style.fontWeight, style.lineHeight, style.letterSpacing].join('|');
+      if (type && style.fontFamily) add(maps.typography, type, { family: style.fontFamily, size: style.fontSize, weight: style.fontWeight, lineHeight: style.lineHeight, letterSpacing: style.letterSpacing });
+      [style.marginTop, style.marginRight, style.marginBottom, style.marginLeft, style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft, style.gap, style.rowGap, style.columnGap].forEach(value => add(maps.spacing, value));
+      add(maps.radii, style.borderRadius);
+      add(maps.shadows, style.boxShadow);
+      if (el.matches?.('button, a, [role="button"], input[type="button"], input[type="submit"]')) {
+        const key = [style.borderRadius, style.fontSize, style.fontWeight, style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft].join('|');
+        const row = components.get(key) || { radius: style.borderRadius, size: style.fontSize, weight: style.fontWeight, padding: `${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft}`, count: 0 };
+        row.count += 1; components.set(key, row);
+      }
+      const text = (el.textContent || '').trim();
+      const rect = el.getBoundingClientRect?.();
+      const fg = parseColor(style.color), bgColor = parseColor(style.backgroundColor);
+      if (text && rect?.width > 2 && rect?.height > 2 && fg && bgColor && bgColor[3] > .9) {
+        contrastChecks += 1;
+        const ratio = contrastRatio(fg, bgColor);
+        const large = parseFloat(style.fontSize) >= 18 || (parseFloat(style.fontSize) >= 14 && Number(style.fontWeight) >= 700);
+        if (ratio < (large ? 3 : 4.5)) contrastFails += 1;
+      }
+    }
+    const list = (map, max = 32) => [...map.values()].sort((a, b) => b.count - a.count || a.value.localeCompare(b.value)).slice(0, max);
+    const colors = list(maps.colors).map((row, index) => ({ ...row, rank: index + 1 }));
+    const gradients = list(maps.gradients, 16);
+    const typography = list(maps.typography, 20);
+    const spacing = list(maps.spacing, 24);
+    const radii = list(maps.radii, 16);
+    const shadows = list(maps.shadows, 16);
+    const componentStyles = [...components.values()].sort((a, b) => b.count - a.count).slice(0, 12);
+    const frameworkChecks = [
+      ['React', !!globalThis.React || /react(?:\.production)?(?:\.min)?\.js/i.test([...document.scripts].map(s => s.src).join(' '))],
+      ['Vue', !!globalThis.Vue || /vue(?:\.global)?(?:\.runtime)?(?:\.min)?\.js/i.test([...document.scripts].map(s => s.src).join(' '))],
+      ['Angular', !!globalThis.ng || [...document.querySelectorAll('[ng-version]')].length > 0],
+      ['Svelte', [...document.querySelectorAll('[class*="svelte-"]')].length > 0],
+      ['Tailwind', [...document.querySelectorAll('[class*="bg-"]')].length > 4 && [...document.querySelectorAll('[class*="text-"]')].length > 4]
+    ];
+    const frameworks = frameworkChecks.filter(row => row[1]).map(row => row[0]);
+    const uniqueColors = maps.colors.size;
+    const uniqueTypes = maps.typography.size;
+    const repeatedColors = colors.filter(row => row.count >= 3).length;
+    const repeatedTypes = typography.filter(row => row.count >= 3).length;
+    const issues = [];
+    if (uniqueColors > 24) issues.push({ level: 'warn', title: '색상 토큰이 분산되어 있습니다', detail: `${uniqueColors}개의 색상이 감지되었습니다. 상위 색상을 토큰으로 정리하면 일관성이 좋아집니다.` });
+    if (uniqueTypes > 18) issues.push({ level: 'warn', title: '타이포그래피 계층이 복잡합니다', detail: `${uniqueTypes}개의 서체 조합이 감지되었습니다.` });
+    if (!gradients.length) issues.push({ level: 'info', title: '그라디언트가 감지되지 않았습니다', detail: '단색 중심의 페이지입니다.' });
+    if (!shadows.length) issues.push({ level: 'info', title: '그림자가 감지되지 않았습니다', detail: '평면형 표면 스타일을 사용하고 있습니다.' });
+    if (contrastFails) issues.push({ level: 'warn', title: '대비가 낮은 텍스트가 있습니다', detail: `${contrastChecks}개 텍스트 조합 중 ${contrastFails}개가 WCAG AA 기준보다 낮습니다.` });
+    if (componentStyles.length > 5 && componentStyles[0].count > componentStyles[1]?.count * 4) issues.push({ level: 'info', title: '컴포넌트 스타일 편차가 큽니다', detail: '버튼·링크 계열의 반복 스타일이 여러 조합으로 나뉘어 있습니다.' });
+    const consistency = Math.max(0, Math.min(100, 100 - Math.min(48, Math.max(0, uniqueColors - 8) * 2) - Math.min(28, Math.max(0, uniqueTypes - 6) * 2) - Math.min(18, contrastFails) + Math.min(12, repeatedColors) + Math.min(8, repeatedTypes)));
+    const clampScore = value => Math.max(0, Math.min(100, Math.round(value)));
+    const health = [
+      { key: 'typography', label: 'Typography', score: clampScore(100 - Math.max(0, uniqueTypes - 8) * 3) },
+      { key: 'spacing', label: 'Spacing', score: clampScore(100 - Math.max(0, maps.spacing.size - 14) * 2) },
+      { key: 'components', label: 'Components', score: clampScore(100 - Math.max(0, componentStyles.length - 5) * 4) },
+      { key: 'accessibility', label: 'Accessibility', score: clampScore(100 - contrastFails * 8) },
+      { key: 'colors', label: 'Color system', score: clampScore(100 - Math.max(0, uniqueColors - 12) * 2) },
+      { key: 'layout', label: 'Layout', score: clampScore(100 - Math.max(0, radii.length - 10) * 2) },
+      { key: 'interaction', label: 'Interaction', score: 100 }
+    ];
+    const css = [
+      ':root {',
+      ...colors.slice(0, 12).map((row, i) => `  --lp-color-${i + 1}: ${row.value};`),
+      ...typography.slice(0, 8).map((row, i) => `  --lp-type-${i + 1}: ${row.size} ${row.family};`),
+      ...radii.slice(0, 6).map((row, i) => `  --lp-radius-${i + 1}: ${row.value};`),
+      ...spacing.slice(0, 8).map((row, i) => `  --lp-space-${i + 1}: ${row.value};`),
+      '}'
+    ].join('\n');
+    const tokens = { colors, gradients, typography, spacing, radii, shadows, components: componentStyles, frameworks, contrast: { checks: contrastChecks, failures: contrastFails }, health, inspected, score: consistency, issues };
+    const tailwind = `/** Let's Pick design tokens */\nexport default {\n  theme: { extend: {\n    colors: ${JSON.stringify(Object.fromEntries(colors.slice(0, 12).map((row, i) => [`lp-${i + 1}`, row.value])), null, 2)},\n    borderRadius: ${JSON.stringify(Object.fromEntries(radii.slice(0, 6).map((row, i) => [`lp-${i + 1}`, row.value])), null, 2)}\n  }}\n}`;
+    return { ...tokens, css, tailwind, json: JSON.stringify(tokens, null, 2) };
+  }
+
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+  const abs = value => SL.abs(value, location.href);
+  const esc = SL.esc;
+  const bytes = SL.bytes;
+  const fileName = SL.fileName;
+  const labelOf = item => item?.name || fileName(item?.url || '') || 'media';
+
+  function svgSource(item) {
+    if (item?.code) return item.code;
+    if (/^data:image\/svg/i.test(item?.url || '')) {
+      try { return decodeURIComponent((item.url.split(',')[1] || '').replace(/\+/g, ' ')); }
+      catch { return item.url; }
+    }
+    return '';
+  }
+
+  function copySvg(item, button) {
+    const run = text => {
+      if (!text) return;
+      copy(text, button);
+    };
+    const local = svgSource(item);
+    if (local) return run(local);
+    if (/\.svg(?:$|[?#])/i.test(item.url || '')) {
+      fetchBytes(item.url).then(blob => blob.text()).then(text => {
+        item.code = sanitizeSvg(text);
+        run(item.code);
+      }).catch(() => copy(item.url, button));
+      return;
+    }
+    copy(item.url, button);
+  }
+
+
+  function siteProfile() {
+    return (typeof sourceLensSite === 'function' ? sourceLensSite(location.hostname) : { kind: siteKind(), svgMin: 12, skipChrome: true });
+  }
+
+  function siteKind() {
+    const host = location.hostname.replace(/^www\./, '').toLowerCase();
+    const mapped = (typeof sourceLensSite === 'function' && sourceLensSite(host).kind) || '';
+    if (mapped && mapped !== 'generic') return mapped;
+    if (host.endsWith('youtube.com') || host === 'youtu.be') return 'youtube';
+    if (host.endsWith('instagram.com')) return 'instagram';
+    if (host.endsWith('facebook.com') || host === 'fb.watch') return 'facebook';
+    if (host.endsWith('vimeo.com') || host.endsWith('vimeocdn.com')) return 'vimeo';
+    if (host.endsWith('tiktok.com')) return 'tiktok';
+    if (host.endsWith('naver.com')) return 'naver';
+    if (host.endsWith('kakao.com') || host.endsWith('kakaocdn.net')) return 'kakao';
+    if (host.endsWith('daum.net') || host.endsWith('daumcdn.net')) return 'daum';
+    if (/gmarket\.co\.kr|auction\.co\.kr|coupang\.com|11st\.co\.kr|smartstore\.naver|shopping\.naver|brand\.naver|tmon\.co\.kr|wemakeprice|ssg\.com|lotteon\.com/.test(host)) return 'commerce';
+    return host;
+  }
+
+  function isCommerce() {
+    return ['commerce', 'stock'].includes(siteKind()) || /item\.|product|goods|shop|store|mall/i.test(location.hostname + location.pathname);
+  }
+
+  function upgradeCommerceUrl(url) {
+    return SL.upgradeMediaUrl(url);
+  }
+
+  function isTallItem(item) {
+    const w = item?.width || 0, h = item?.height || 0;
+    return h >= 1200 && w > 0 && h > w * 2.2;
+  }
+
+  function videoEmptyMessage() {
+    const k = siteKind();
+    if (k === 'commerce') return '이 페이지에는 재생할 영상 파일이 없습니다. LIVE 표기는 SVG 배지입니다.';
+    return '영상을 찾지 못했습니다. 영상을 한 번 재생한 뒤(인스타·페북은 영상을 화면에 띄운 뒤) 다시 열어 보세요.';
+  }
+
+  // Since 1.1 no site is blanket-blocked: every video gets a concrete way to save (or a clear reason why not).
+  function videoLocked() {
+    return false;
+  }
+
+  function refreshVideoItems() {
+    try {
+      state.videoItems = VF ? VF.collect().map(item => ({
+        ...item,
+        poster: item.poster || item.thumbnail || videoPoster(item)
+      })) : [];
+    } catch (e) { state.videoItems = []; }
+    return state.videoItems;
+  }
+  if (VF) VF.onChange(() => {
+    if (!state.panel) return;
+    const before = state.videoItems.map(i => i.kind + i.url + i.quality).join('|');
+    refreshVideoItems();
+    const after = state.videoItems.map(i => i.kind + i.url + i.quality).join('|');
+    if (before !== after) state.updateVideoTab?.();
+  });
+
+  function itemPixel(item) {
+    const url = item?.url || '';
+    const sized = /s(\d{3,4})x(\d{3,4})/i.exec(url);
+    if (sized) return Math.max(Number(sized[1]), Number(sized[2]));
+    if (/_(?:n|o)\.(?:jpe?g|png|webp)/i.test(url)) return 1080;
+    return Math.max(item?.width || 0, item?.height || 0);
+  }
+
+  function candidate(url, source, hint, extra = {}) {
+    let value = abs(url);
+    if (!value) return null;
+    if (typeof SL.unwrapMediaUrl === 'function') value = abs(SL.unwrapMediaUrl(value)) || value;
+    if (SL.isUiJunk(value) && hint !== 'svg' && !extra.allowJunk) return null;
+    let rewritten = false;
+    if (hint !== 'svg' && hint !== 'video' && typeof SL.upgradeMediaUrl === 'function') {
+      const upgraded = SL.upgradeMediaUrl(value);
+      if (upgraded && upgraded !== value && (SL.isImageUrl(upgraded) || SL.PHOTO_EXT.test(upgraded) || /pstatic\.net|unsplash|pexels|coupangcdn|danawa/i.test(upgraded))) {
+        value = upgraded;
+        rewritten = true;
+      }
+    }
+    const info = SL.classifyUrl(value, hint);
+    if (SL.PHOTO_EXT.test(value) || SL.isImageUrl(value)) info.type = 'image';
+    if (info.type === 'video' && SL.isImageUrl(value)) info.type = 'image';
+    if (info.type === 'video' && /i\.ytimg|maxresdefault|hqdefault|mqdefault/i.test(value)) info.type = 'image';
+    return {
+      url: value, source, ...info,
+      confidence: extra.confidence || '중간',
+      code: extra.code,
+      element: extra.element || null,
+      width: extra.width || extra.element?.naturalWidth || extra.element?.videoWidth || 0,
+      height: extra.height || extra.element?.naturalHeight || extra.element?.videoHeight || 0,
+      size: extra.size || 0,
+      mime: extra.mime || '',
+      name: extra.name || '',
+      poster: extra.poster || extra.thumbnail || '',
+      thumbnail: extra.thumbnail || extra.poster || '',
+      audioOnly: !!extra.audioOnly,
+      family: extra.family || '',
+      weight: extra.weight || '',
+      style: extra.style || '',
+      format: extra.format || '',
+      fp: extra.fp || '',
+      relation: extra.relation || 'target',
+      rewritten
+    };
+  }
+
+  function removeStaleHosts(keep) {
+    document.querySelectorAll('#sl-host').forEach(h => { if (h !== (keep || state.host)) h.remove(); });
+  }
+
+  function uiRoot() {
+    if (state.shadow) return state.shadow;
+    const host = document.createElement('div');
+    host.id = 'sl-host';
+    host.style.cssText = 'all:initial;position:fixed;inset:0;z-index:2147483647;pointer-events:none;';
+    const shadow = host.attachShadow({ mode: 'open' });
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = chrome.runtime.getURL('content.css');
+    const extra = document.createElement('style');
+    extra.textContent = `
+      :host {
+        --sl-brand: #3ecf8e;
+        --sl-brand-hover: #65d9a5;
+        --sl-ink: #ededed;
+        font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      #sl-root { pointer-events: none; position: fixed; inset: 0; }
+      #sl-panel, .sl-lightbox, .sl-slice-editor { pointer-events: auto; }
+    `;
+    shadow.append(link, extra);
+    removeStaleHosts(host);
+    document.documentElement.append(host);
+    state.host = host;
+    state.shadow = shadow;
+    return shadow;
+  }
+
+  function isChromeImage(node, url) {
+    if (siteProfile().skipChrome === false) return false;
+    const src = url || node?.currentSrc || node?.src || '';
+    if (/logo|favicon|image__logo|\/ci\/|brand[_-]?mark|sprite\.(?:png|gif|svg)/i.test(src)) return true;
+    if (/\/(?:emoticon|emoji|nickcon)\//i.test(src)) return true;
+    if (node?.closest?.('header, nav, [role="banner"], .header, #header, .gds-header, footer')) return true;
+    return false;
+  }
+
+  function mediaAtPoint(x, y) {
+    const stack = document.elementsFromPoint(x, y).filter(node => node !== state.host && !node.closest?.('#sl-host'));
+    const hitRect = (node, pad = 0) => {
+      const r = node.getBoundingClientRect();
+      return r.width >= 24 && r.height >= 24
+        && x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad;
+    };
+    const imgsUnder = $$('img').filter(img => !img.closest?.('#sl-host') && !isChromeImage(img) && hitRect(img, 4))
+      .sort((a, b) => {
+        const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+        return (ra.width * ra.height) - (rb.width * rb.height);
+      });
+    if (imgsUnder.length) {
+      const small = imgsUnder[0];
+      const sr = small.getBoundingClientRect();
+      if (sr.width < 80 || sr.height < 80) {
+        const large = imgsUnder.find(img => {
+          const r = img.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 120;
+        });
+        if (large) return large;
+      }
+      return small;
+    }
+    const videosUnder = $$('video').filter(v => !v.closest?.('#sl-host') && hitRect(v));
+    if (videosUnder[0]) return videosUnder[0];
+    const svgsUnder = $$('svg').filter(s => !s.closest?.('#sl-host') && hitRect(s, 2));
+    if (svgsUnder[0] && !imgsUnder.length) return svgsUnder[0];
+    const found = [];
+    for (const node of stack) {
+      const media = node.tagName && /^(IMG|VIDEO|SVG|PICTURE)$/.test(node.tagName)
+        ? node
+        : node.closest?.('img, video, svg, picture');
+      if (!media || found.includes(media) || isChromeImage(media)) continue;
+      const r = media.getBoundingClientRect();
+      if (media.tagName !== 'SVG' && (r.width < 24 || r.height < 24)) continue;
+      found.push(media);
+    }
+    if (found[0]) return found[0];
+    // Prefer the element actually under the pointer. Falling back to an image
+    // hundreds of pixels away made text/background Alt+clicks inspect the wrong
+    // card on dense feeds and detail pages.
+    const top = stack[0];
+    if (top && !/^(HTML|BODY)$/i.test(top.tagName || '')) return top;
+    const nearby = $$('img').filter(img => {
+      if (img.closest?.('#sl-host') || isChromeImage(img)) return false;
+      const r = img.getBoundingClientRect();
+      if (r.width < 48 || r.height < 48) return false;
+      return Math.hypot(r.left + r.width / 2 - x, r.top + r.height / 2 - y) < 220;
+    }).sort((a, b) => {
+      const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      const da = Math.hypot(ra.left + ra.width / 2 - x, ra.top + ra.height / 2 - y);
+      const db = Math.hypot(rb.left + rb.width / 2 - x, rb.top + rb.height / 2 - y);
+      return da - db;
+    });
+    return nearby[0] || top || null;
+  }
+
+  function pathKey(url) {
+    try {
+      return new URL(url, location.href).pathname.replace(/\/+$/, '').split('/').pop() || url;
+    } catch {
+      return url;
+    }
+  }
+
+  function canonicalImageKey(url) {
+    try {
+      const u = new URL(url, location.href);
+      ['w', 'h', 'width', 'height', 'q', 'quality', 'dpr', 'fit', 'crop', 'auto', 'cs', 's', 'size', 'type', 't', 'w2', 'rs'].forEach(k => u.searchParams.delete(k));
+      const path = u.pathname
+        .replace(/\/thumbnails\/remote\/\d+x\d+(?:ex)?\//ig, '/')
+        .replace(/\/(?:small|medium|large|thumb|original)\//ig, '/')
+        .replace(/\/\d{2,4}x\d{2,4}\//g, '/')
+        .replace(/_(?:small|medium|large|thumb|teaser|n|o)\b/ig, '')
+        .replace(/_\d{2,4}(?=\.(?:jpe?g|png|webp))/i, '');
+      return `${u.hostname.replace(/^www\./, '')}${path}`;
+    } catch {
+      return url;
+    }
+  }
+
+  function largestSrcset(srcset) {
+    return SL.largestSrcset(srcset);
+  }
+
+  function srcsetWidth(srcset, url) {
+    const hit = SL.parseSrcset(srcset).find(c => c.url === url);
+    return hit && hit.unit === 'w' ? Math.round(hit.value) : 0;
+  }
+
+  function isLightPaint(value) {
+    const v = String(value || '').trim().toLowerCase();
+    if (!v || v === 'currentcolor' || v === 'inherit' || v === 'white' || v === '#fff' || v === '#ffffff' || v === '#fefefe' || v === 'rgb(255,255,255)') return true;
+    if (v === 'none' || /^url\(/i.test(v)) return false;
+    const hex = v.match(/^#([0-9a-f]{3,8})$/i);
+    if (hex) {
+      let h = hex[1];
+      if (h.length === 3 || h.length === 4) h = h.split('').map(c => c + c).join('').slice(0, 6);
+      const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+      return (r + g + b) / 3 > 186;
+    }
+    const rgb = v.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if (rgb) return (Number(rgb[1]) + Number(rgb[2]) + Number(rgb[3])) / 3 > 186;
+    return false;
+  }
+
+  function previewSvg(code) {
+    const sanitized = sanitizeSvg(code);
+    try {
+      const doc = new DOMParser().parseFromString(sanitized, 'image/svg+xml');
+      const root = doc.documentElement;
+      if (!root || root.tagName.toLowerCase() !== 'svg') return sanitized;
+      root.setAttribute('color', '#111111');
+      const w = parseFloat(root.getAttribute('width')) || 24;
+      const h = parseFloat(root.getAttribute('height')) || 24;
+      if (!root.getAttribute('viewBox')) root.setAttribute('viewBox', `0 0 ${w} ${h}`);
+      root.removeAttribute('width');
+      root.removeAttribute('height');
+      root.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+      const paint = (el) => {
+        if (!el.getAttribute) return;
+        ['fill', 'stroke'].forEach(attr => {
+          const v = (el.getAttribute(attr) || '').trim();
+          if (!v || v === 'currentColor' || isLightPaint(v)) el.setAttribute(attr, v === 'none' ? 'none' : '#111111');
+        });
+        const style = el.getAttribute('style');
+        if (style) {
+          el.setAttribute('style', style
+            .replace(/fill\s*:\s*(currentColor|[^;]+)/ig, (m, v) => /none/i.test(v) ? m : 'fill:#111111')
+            .replace(/stroke\s*:\s*(currentColor|[^;]+)/ig, (m, v) => /none/i.test(v) ? m : 'stroke:#111111')
+            .replace(/color\s*:\s*[^;]+/ig, 'color:#111111'));
+        }
+      };
+      paint(root);
+      root.querySelectorAll('*').forEach(paint);
+      if (!root.getAttribute('fill') && !root.getAttribute('stroke')) root.setAttribute('fill', '#111111');
+      return new XMLSerializer().serializeToString(root);
+    } catch {
+      return sanitized;
+    }
+  }
+
+  function sanitizeSvg(code) {
+    try {
+      const doc = new DOMParser().parseFromString(code, 'image/svg+xml');
+      doc.querySelectorAll('script, foreignObject').forEach(n => n.remove());
+      doc.querySelectorAll('*').forEach(el => {
+        [...el.attributes].forEach(attr => {
+          if (/^on/i.test(attr.name) || /javascript:/i.test(attr.value)) el.removeAttribute(attr.name);
+        });
+      });
+      return new XMLSerializer().serializeToString(doc.documentElement);
+    } catch {
+      return String(code || '').replace(/<script[\s\S]*?<\/script>/gi, '');
+    }
+  }
+
+  function collectImgLike(node, out, media) {
+    const display = node.currentSrc || node.src || '';
+    const best = largestSrcset(node.srcset || node.getAttribute('srcset') || '');
+    const bestW = best ? srcsetWidth(node.srcset || node.getAttribute('srcset') || '', best) : 0;
+    const displayPx = Math.max(node.naturalWidth || 0, node.naturalHeight || 0, itemPixel({ url: abs(display) }));
+    const pick = best && (bestW > displayPx || itemPixel({ url: abs(best) }) > displayPx || !display) ? best : display;
+    if (pick) {
+      out.push(candidate(pick, pick === best ? 'srcset 최대' : 'img.currentSrc', 'image', {
+        element: media, confidence: '최상', allowJunk: true,
+        width: pick === best && bestW ? bestW : 0,
+        height: pick === best && bestW && node.naturalWidth ? Math.round(bestW * node.naturalHeight / node.naturalWidth) : 0
+      }));
+    }
+    const lazySet = largestSrcset(node.getAttribute('data-srcset') || '');
+    if (lazySet) out.push(candidate(lazySet, '속성:data-srcset', 'image', { element: media, confidence: '높음' }));
+    ['data-src', 'data-original', 'data-full', 'data-full-url', 'data-lazy-src', 'data-zoom-image',
+      'data-origin', 'data-url', 'data-image', 'data-img', 'data-orig-file', 'data-lazy', 'org_src'].forEach(attr => {
+      out.push(candidate(node.getAttribute(attr), `속성:${attr}`, 'image', { element: media, confidence: '중간' }));
+    });
+  }
+
+  function collectTarget(target) {
+    if (!target) return { media: null, candidates: [] };
+    const media = target?.matches?.('img,video,svg,picture')
+      ? target
+      : target?.closest?.('img,video,svg,picture');
+    const out = [];
+    if (!media) {
+      let cur = target;
+      for (let i = 0; i < 6 && cur; i++) {
+        const bg = getComputedStyle(cur).backgroundImage || '';
+        const re = /url\(\s*["']?([^"')]+?)["']?\s*\)/g;
+        let match;
+        while ((match = re.exec(bg))) {
+          const u = abs(match[1]);
+          if (!u || (/^data:/i.test(u) && !/^data:image\/svg/i.test(u)) || isChromeImage(cur, u)) continue;
+          out.push(candidate(u, '배경 이미지', /\.svg(?:$|[?#])|^data:image\/svg/i.test(u) ? 'svg' : 'image', { confidence: '최상', element: cur }));
+        }
+        if (out.filter(Boolean).length) return { media: cur, candidates: out.filter(Boolean) };
+        cur = cur.parentElement;
+      }
+      return { media: null, candidates: out };
+    }
+    const tag = media.tagName.toLowerCase();
+    if (tag === 'svg') {
+      const code = sanitizeSvg(new XMLSerializer().serializeToString(media));
+      out.push(candidate(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(code)}`, 'inline SVG', 'svg', {
+        element: media, code, confidence: '최상'
+      }));
+    }
+    if (tag === 'picture') $$('source[srcset], img', media).forEach(node => collectImgLike(node, out, media));
+    if (tag === 'img') collectImgLike(media, out, media);
+    if (tag === 'video') {
+      out.push(candidate(media.currentSrc || media.src, 'video.currentSrc', 'video', { element: media, confidence: '최상' }));
+      $$('source[src]', media).forEach(s => out.push(candidate(s.src, 'video.source', 'video', { element: media, confidence: '높음' })));
+      if (media.poster) out.push(candidate(media.poster, 'video.poster', 'image', { element: media, confidence: '중간' }));
+    }
+    return { media, candidates: out.filter(Boolean) };
+  }
+
+  // Alt+click is also an inspector entry point. Keep the inspection data
+  // separate from media candidates so a CSS background or a text node does
+  // not get mistaken for an image/video item.
+  function analysisElement(target) {
+    let el = target?.nodeType === 3 ? target.parentElement : target;
+    if (!el?.closest) return null;
+    el = el.closest('*');
+    if (!el || el === state.host || el.closest?.('#sl-host')) return null;
+    if (/^(SCRIPT|STYLE|LINK|META|NOSCRIPT|BR|SOURCE)$/i.test(el.tagName)) el = el.parentElement;
+    return el && el !== document.documentElement ? el : document.body;
+  }
+
+  function elementSelector(el) {
+    if (!el?.tagName) return '';
+    if (el.id) return `#${el.id}`;
+    const parts = [];
+    let cur = el;
+    for (let i = 0; cur && cur !== document.body && parts.length < 4; i += 1, cur = cur.parentElement) {
+      let part = cur.tagName.toLowerCase();
+      const classes = [...(cur.classList || [])].filter(c => /^[a-z][\w-]{0,30}$/i.test(c)).slice(0, 2);
+      if (classes.length) part += `.${classes.join('.')}`;
+      const parent = cur.parentElement;
+      if (parent) {
+        const same = [...parent.children].filter(child => child.tagName === cur.tagName);
+        if (same.length > 1) part += `:nth-of-type(${same.indexOf(cur) + 1})`;
+      }
+      parts.unshift(part);
+    }
+    return parts.join(' > ') || el.tagName.toLowerCase();
+  }
+
+  function parseBackgroundUrls(value) {
+    const urls = [];
+    const re = /url\(\s*["']?([^"')]+?)["']?\s*\)/gi;
+    let match;
+    while ((match = re.exec(String(value || '')))) {
+      const url = abs(match[1]);
+      if (url && !/^data:/i.test(url) && !urls.includes(url)) urls.push(url);
+    }
+    return urls;
+  }
+
+  function hasPaint(value) {
+    const v = String(value || '').trim().toLowerCase();
+    return !!v && v !== 'none' && v !== 'transparent' && !/^rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)$/i.test(v);
+  }
+
+  function analyzeTarget(target) {
+    const el = analysisElement(target);
+    if (!el) return null;
+    let style;
+    try { style = getComputedStyle(el); } catch { return null; }
+    // A click often lands on a transparent overlay inside the actual painted
+    // section. Walk up until the first ancestor that owns a real background so
+    // page-level images/gradients are still inspectable without changing the
+    // text element used for typography analysis.
+    let backgroundEl = el;
+    let backgroundStyle = style;
+    for (let cur = el; cur; cur = cur.parentElement) {
+      let candidateStyle;
+      try { candidateStyle = getComputedStyle(cur); } catch { continue; }
+      const imageValue = candidateStyle.backgroundImage || 'none';
+      if (imageValue !== 'none' || hasPaint(candidateStyle.backgroundColor)) {
+        backgroundEl = cur;
+        backgroundStyle = candidateStyle;
+        break;
+      }
+      if (cur === document.body) break;
+    }
+    const backgroundImage = backgroundStyle.backgroundImage || 'none';
+    const urls = parseBackgroundUrls(backgroundImage);
+    const hasGradient = /gradient\(/i.test(backgroundImage);
+    const hasBackgroundImage = backgroundImage !== 'none';
+    const background = hasBackgroundImage || hasGradient || hasPaint(backgroundStyle.backgroundColor)
+      ? {
+          image: backgroundImage,
+          urls,
+          gradient: hasGradient ? backgroundImage : '',
+          color: backgroundStyle.backgroundColor,
+          position: backgroundStyle.backgroundPosition,
+          size: backgroundStyle.backgroundSize,
+          repeat: backgroundStyle.backgroundRepeat,
+          blend: backgroundStyle.backgroundBlendMode,
+          tag: backgroundEl.tagName.toLowerCase(),
+          selector: elementSelector(backgroundEl)
+        }
+      : null;
+    const rawText = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    const hasDirectText = [...(el.childNodes || [])].some(node => node.nodeType === 3 && node.textContent.trim());
+    const textLike = hasDirectText || /^(A|BUTTON|H[1-6]|P|SPAN|STRONG|EM|LABEL|LI|TD|TH|FIGCAPTION|OPTION)$/i.test(el.tagName);
+    const rect = el.getBoundingClientRect();
+    const text = rawText && textLike && rect.width >= 2 && rect.height >= 2
+      ? {
+          sample: rawText.slice(0, 180),
+          color: style.color,
+          family: style.fontFamily,
+          size: style.fontSize,
+          weight: style.fontWeight,
+          style: style.fontStyle,
+          lineHeight: style.lineHeight,
+          letterSpacing: style.letterSpacing,
+          align: style.textAlign,
+          decoration: [style.textDecorationLine, style.textDecorationStyle].filter(Boolean).join(' '),
+          transform: style.textTransform,
+          shadow: style.textShadow
+        }
+      : null;
+    if (!background && !text) return null;
+    const cssText = [
+      background && `background-image: ${background.image};`,
+      background && `background-color: ${background.color};`,
+      background && `background-position: ${background.position};`,
+      background && `background-size: ${background.size};`,
+      text && `font-family: ${text.family};`,
+      text && `font-size: ${text.size};`,
+      text && `font-weight: ${text.weight};`,
+      text && `color: ${text.color};`,
+      text && `line-height: ${text.lineHeight};`,
+      text && `letter-spacing: ${text.letterSpacing};`
+    ].filter(Boolean).join('\n');
+    return {
+      kind: 'style',
+      selector: elementSelector(el),
+      tag: el.tagName.toLowerCase(),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      background,
+      text,
+      cssText
+    };
+  }
+
+  function plainAnalysis(analysis) {
+    if (!analysis) return null;
+    const { element, ...plain } = analysis;
+    return plain;
+  }
+
+  function analysisRows(analysis) {
+    const rows = [];
+    const add = (label, value) => { if (value && value !== 'none' && value !== 'normal') rows.push([label, value]); };
+    add('영역', analysis.width && analysis.height ? `${analysis.width} × ${analysis.height}px` : '');
+    if (analysis.background) {
+      add('배경 색상', analysis.background.color);
+      add('배경 이미지', analysis.background.urls.join('\n'));
+      add('그라디언트', analysis.background.gradient);
+      add('위치 / 크기', `${analysis.background.position} / ${analysis.background.size}`);
+      add('반복', analysis.background.repeat);
+      add('블렌드', analysis.background.blend);
+    }
+    if (analysis.text) {
+      add('서체', analysis.text.family);
+      add('글자 크기', analysis.text.size);
+      add('굵기', analysis.text.weight);
+      add('글자 색상', analysis.text.color);
+      add('행간', analysis.text.lineHeight);
+      add('자간', analysis.text.letterSpacing);
+      add('정렬', analysis.text.align);
+      add('스타일', [analysis.text.style, analysis.text.transform, analysis.text.decoration].filter(Boolean).join(' · '));
+      add('그림자', analysis.text.shadow);
+    }
+    return rows;
+  }
+
+  function renderStyleAnalysis(analysis) {
+    const card = document.createElement('article');
+    card.className = 'sl-inspector-card';
+    const title = analysis.background && analysis.text ? '요소 스타일 분석' : analysis.background ? 'CSS 배경 분석' : '텍스트 스타일 분석';
+    const kicker = analysis.background && analysis.text ? 'BACKGROUND · TYPOGRAPHY' : analysis.background ? 'CSS BACKGROUND' : 'TEXT CSS';
+    card.innerHTML = `<div class="sl-kicker">${esc(kicker)}</div><strong>${esc(title)}</strong>`;
+    if (analysis.background) {
+      const swatch = document.createElement('div');
+      swatch.className = 'sl-style-swatch';
+      swatch.style.backgroundColor = analysis.background.color || 'transparent';
+      if (analysis.background.image && analysis.background.image !== 'none') swatch.style.backgroundImage = analysis.background.image;
+      card.append(swatch);
+    }
+    if (analysis.text) {
+      const sample = document.createElement('div');
+      sample.className = 'sl-text-sample';
+      sample.textContent = analysis.text.sample;
+      sample.style.color = analysis.text.color;
+      sample.style.fontFamily = analysis.text.family;
+      sample.style.fontSize = analysis.text.size;
+      sample.style.fontWeight = analysis.text.weight;
+      sample.style.fontStyle = analysis.text.style;
+      sample.style.lineHeight = analysis.text.lineHeight;
+      sample.style.letterSpacing = analysis.text.letterSpacing;
+      card.append(sample);
+    }
+    const rows = document.createElement('dl');
+    rows.className = 'sl-inspector-rows';
+    analysisRows(analysis).forEach(([label, value]) => {
+      const dt = document.createElement('dt');
+      dt.textContent = label;
+      const dd = document.createElement('dd');
+      dd.textContent = value;
+      rows.append(dt, dd);
+    });
+    card.append(rows);
+    const actions = document.createElement('div');
+    actions.className = 'sl-inspector-actions';
+    actions.append(actionButton('primary', 'CSS 복사', () => copy(analysis.cssText), 'code'));
+    analysis.background?.urls?.slice(0, 3).forEach((url, index) => {
+      actions.append(actionButton('normal', `배경 URL ${index + 1} 복사`, () => copy(url), 'copy'));
+      actions.append(actionButton('normal', `배경 URL ${index + 1} 보기`, () => window.open(url, '_blank', 'noopener'), 'open'));
+    });
+    card.append(actions);
+    return card;
+  }
+
+  document.documentElement.addEventListener('sl-platform-media', event => {
+    const detail = event.detail || {};
+    const items = [];
+    (detail.videos || []).forEach(row => {
+      const item = candidate(row.url, row.source || '플랫폼 영상', 'video', { confidence: '높음', relation: 'platform' });
+      if (item) items.push(item);
+    });
+    (detail.images || []).forEach(row => {
+      const item = candidate(row.url, row.source || '플랫폼 이미지', 'image', { confidence: '중간', relation: 'platform' });
+      if (item && SL.isImageUrl(item.url)) items.push(item);
+    });
+    state.platformMedia = dedupe([...(state.platformMedia || []), ...items]);
+    if (state.panel && items.length) {
+      const have = new Set(state.candidates.map(itemKey));
+      state.platformMedia.forEach(item => {
+        const key = itemKey(item);
+        if (!have.has(key)) {
+          have.add(key);
+          state.candidates.push(item);
+        }
+      });
+      state.redraw?.();
+    }
+  });
+
+  document.documentElement.addEventListener('sl-media-url', event => {
+    const url = event.detail?.url;
+    if (!url || SL.isUiJunk(url) || !SL.isVideoUrl(url)) return;
+    state.pageNet.push({ url, via: event.detail.via || 'page', t: Date.now(), hint: 'video' });
+    if (state.pageNet.length > 80) state.pageNet.splice(0, state.pageNet.length - 80);
+  });
+
+  function collectRecentVideos(clicked) {
+    const clickedSrc = abs(clicked?.currentSrc || clicked?.src || '');
+    const cutoff = Date.now() - 12000;
+    const map = new Map();
+    const add = (url, source, size) => {
+      if (!url || !SL.isVideoUrl(url) || SL.isImageUrl(url)) return;
+      const item = candidate(url, source, 'video', { confidence: '높음', relation: 'network', size: size || 0 });
+      if (!item) return;
+      const key = pathKey(item.url);
+      const prev = map.get(key);
+      if (!prev || (item.size || 0) > (prev.size || 0) || item.url.length > prev.url.length) map.set(key, item);
+    };
+    state.pageNet.forEach(item => { if (item.t >= cutoff) add(item.url, '캡처된 영상'); });
+    performance.getEntriesByType('resource').forEach(entry => {
+      if (/mp4|m4v|webm|m3u8|videoplayback|googlevideo|vimeocdn|akamaized|scontent|fbcdn|cdninstagram/i.test(entry.name)) {
+        add(entry.name, '브라우저 네트워크', entry.encodedBodySize || entry.transferSize || 0);
+      }
+    });
+    let out = [...map.values()];
+    if (clickedSrc && !/^blob:/i.test(clickedSrc)) {
+      const key = pathKey(clickedSrc);
+      out = out.filter(item => pathKey(item.url) === key || item.url === clickedSrc);
+    }
+    out.sort((a, b) => (b.size || 0) - (a.size || 0) || b.url.length - a.url.length);
+    return out.slice(0, 2);
+  }
+
+  function svgName(svg) {
+    const titled = svg.querySelector?.('title')?.textContent?.trim();
+    if (titled) return titled;
+    const lucide = [...(svg.classList || [])].find(c => c.startsWith('lucide-') && c !== 'lucide');
+    if (lucide) return lucide.replace(/^lucide-/, '');
+    const labeled = svg.getAttribute('aria-label')
+      || svg.closest?.('[aria-label], [data-name], [title]')?.getAttribute('aria-label')
+      || svg.closest?.('[data-name]')?.getAttribute('data-name')
+      || svg.closest?.('[title]')?.getAttribute('title');
+    if (labeled) return labeled.trim().slice(0, 60);
+    const sibling = svg.parentElement?.querySelector?.('span, p, figcaption, [class*="name"]')?.textContent?.trim();
+    return (sibling || '').slice(0, 60) || 'icon';
+  }
+
+  function svgFingerprint(svg, code) {
+    const shapes = [...(svg?.querySelectorAll?.('path, circle, rect, polygon, polyline, line, ellipse') || [])]
+      .map(el => [
+        el.tagName.toLowerCase(),
+        (el.getAttribute('d') || '').replace(/\s+/g, ' ').slice(0, 160),
+        el.getAttribute('points') || '',
+        el.getAttribute('r') || '',
+        Math.round(Number(el.getAttribute('cx')) || 0),
+        Math.round(Number(el.getAttribute('cy')) || 0)
+      ].join(':'));
+    if (shapes.length) return shapes.join('|');
+    return String(code || '').replace(/id="[^"]*"/g, '').replace(/\s+/g, ' ').slice(0, 240);
+  }
+
+  function isUiSvg(svg, url, name) {
+    if (siteKind() === 'icons') return false;
+    if (svg?.closest?.('header, nav, footer, [role="banner"], [role="navigation"], .header, #header')) return true;
+    const blob = `${url || ''} ${name || ''}`;
+    if (/header|gnb_|mypage|cart|recent|favicon/i.test(blob)) return true;
+    if (isCommerce() && /live/i.test(`${svg?.textContent || ''} ${name || ''}`)) return true;
+    const r = svg?.getBoundingClientRect?.();
+    if (isCommerce() && r && r.width <= 48 && r.height <= 48) {
+      const circles = svg.querySelectorAll?.('circle')?.length || 0;
+      if (circles >= 3) return true;
+    }
+    return false;
+  }
+
+  function expandSvgUses(svg) {
+    try {
+      const clone = svg.cloneNode(true);
+      clone.querySelectorAll('use').forEach(use => {
+        const href = use.getAttribute('href') || use.getAttribute('xlink:href') || '';
+        if (!href.startsWith('#')) return;
+        const src = document.getElementById(href.slice(1));
+        if (!src) return;
+        const inner = src.cloneNode(true);
+        if (inner.tagName.toLowerCase() === 'symbol' || inner.tagName.toLowerCase() === 'svg') {
+          use.replaceWith(...[...inner.childNodes].map(n => n.cloneNode(true)));
+        } else use.replaceWith(inner);
+      });
+      return clone;
+    } catch {
+      return svg;
+    }
+  }
+
+  const svgCache = new WeakMap();
+  function cachedSvgCandidate(svg, source, confidence, extra) {
+    const hit = svgCache.get(svg);
+    const sig = `${svg.childElementCount}:${svg.attributes.length}`;
+    if (hit && hit.sig === sig && Date.now() - hit.t < 15000) return hit.item;
+    const item = svgCandidate(svg, source, confidence, extra);
+    svgCache.set(svg, { t: Date.now(), sig, item });
+    return item;
+  }
+
+  function svgCandidate(svg, source, confidence, extra = {}) {
+    if (!svg || svg.closest?.('#sl-host')) return null;
+    const r = svg.getBoundingClientRect();
+    const w = Math.max(r.width, svg.clientWidth || 0, Number(svg.getAttribute('width')) || 0);
+    const h = Math.max(r.height, svg.clientHeight || 0, Number(svg.getAttribute('height')) || 0);
+    if (!extra.allowTiny && w < 8 && h < 8 && !svg.querySelector('path, circle, polygon, rect')) return null;
+    if (!extra.keepUi && isUiSvg(svg, extra.url, svgName(svg))) return null;
+    const expanded = expandSvgUses(svg);
+    const code = sanitizeSvg(new XMLSerializer().serializeToString(expanded));
+    const name = svgName(svg);
+    const fp = svgFingerprint(expanded, code);
+    return candidate(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(code)}`, source, 'svg', {
+      element: svg, code, confidence, relation: extra.relation || 'page', name,
+      width: Math.round(w || r.width), height: Math.round(h || r.height), fp
+    });
+  }
+
+  function collectInlineSvg(target) {
+    const clicked = target?.tagName === 'SVG' ? target : target?.closest?.('svg') || target?.querySelector?.('svg');
+    const out = [];
+    if (clicked) {
+      const item = svgCandidate(clicked, 'inline SVG', '최상', { keepUi: true, allowTiny: true, relation: 'target' });
+      if (item) out.push(item);
+    }
+    return out.filter(Boolean);
+  }
+
+  function collectPageSvgs() {
+    const out = [];
+    const seen = new Set();
+    deepAll('svg').forEach(svg => {
+      if (svg.parentElement?.closest?.('svg')) return;
+      const item = cachedSvgCandidate(svg, svg.getAttribute('aria-label') || '페이지 SVG', '중간', { keepUi: true, allowTiny: true });
+      if (!item) return;
+      const key = item.fp || item.name || item.url;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(item);
+    });
+    deepAll('img, object, embed').forEach(node => {
+      const url = abs(node.currentSrc || node.src || node.getAttribute?.('src') || node.getAttribute?.('data') || '');
+      if (!url || !/\.svg(?:$|[?#])/i.test(url) || node.closest?.('#sl-host')) return;
+      if (isUiSvg(node, url, fileName(url))) return;
+      let path = url;
+      try { path = new URL(url).pathname; } catch { /* keep */ }
+      if (seen.has(path)) return;
+      seen.add(path);
+      out.push(candidate(url, '페이지 SVG', 'svg', {
+        element: node, confidence: '높음', relation: 'page', name: fileName(url), fp: path
+      }));
+    });
+    return out.slice(0, 80);
+  }
+
+  function collectPageFonts() {
+    const out = [];
+    const seen = new Set();
+    const add = (value, extra = {}) => {
+      const url = abs(value);
+      if (!url || !SL.FONT_EXT.test(url) || seen.has(url)) return;
+      seen.add(url);
+      const family = String(extra.family || '').replace(/["']/g, '').trim();
+      const weight = String(extra.weight || '').trim();
+      const style = String(extra.style || '').trim();
+      const name = [family || fileName(url) || 'font', weight && `w${weight}`, style && style !== 'normal' && style].filter(Boolean).join(' · ');
+      const item = candidate(url, '페이지 글꼴', 'font', {
+        confidence: extra.confidence || '높음', relation: 'page', name, family, weight, style,
+        format: extra.format || ''
+      });
+      if (item) out.push(item);
+    };
+    const parseFace = text => {
+      const blocks = String(text || '').match(/@font-face\s*\{[^}]*\}/gi) || [];
+      blocks.forEach(block => {
+        const read = key => block.match(new RegExp(`${key}\\s*:\\s*([^;}]*)`, 'i'))?.[1]?.trim() || '';
+        const src = read('src');
+        const family = read('font-family');
+        const weight = read('font-weight');
+        const style = read('font-style');
+        const format = src.match(/format\(\s*["']?([^"')]+)["']?\s*\)/i)?.[1] || '';
+        const re = /url\(\s*["']?([^"')]+)["']?\s*\)/gi;
+        let m;
+        while ((m = re.exec(src))) add(m[1], { family, weight, style, format });
+      });
+    };
+    deepAll('style').forEach(style => parseFace(style.textContent));
+    try {
+      [...document.styleSheets].forEach(sheet => {
+        let rules;
+        try { rules = sheet.cssRules || []; } catch { return; }
+        [...rules].forEach(rule => {
+          if (rule.type === CSSRule.FONT_FACE_RULE || /^@font-face/i.test(rule.cssText || '')) {
+            const src = rule.style?.src || '';
+            const format = src.match(/format\(\s*["']?([^"')]+)["']?\s*\)/i)?.[1] || '';
+            const re = /url\(\s*["']?([^"')]+)["']?\s*\)/gi;
+            let m;
+            while ((m = re.exec(src))) add(m[1], {
+              family: rule.style?.fontFamily || '', weight: rule.style?.fontWeight || '',
+              style: rule.style?.fontStyle || '', format
+            });
+          }
+        });
+      });
+    } catch { /* cross-origin stylesheets are intentionally skipped */ }
+    deepAll('link[rel="preload"][as="font"][href],link[href]').forEach(link => {
+      const url = link.href || link.getAttribute('href') || '';
+      if (SL.FONT_EXT.test(url)) add(url, { confidence: '중간' });
+    });
+    return out.slice(0, 120);
+  }
+
+  function collectYouTube(target) {
+    const out = [];
+    const nearby = target?.closest?.('a[href], ytd-rich-item-renderer, ytd-video-renderer, ytd-player') || target;
+    const href = nearby?.href || nearby?.querySelector?.('a[href*="watch"], a[href*="shorts"]')?.href || location.href;
+    const id = SL.youtubeIdFromUrl(href) || SL.youtubeIdFromUrl(location.href);
+    if (id) {
+      SL.youtubeThumbs(id).forEach(t => out.push(candidate(t.url, t.source, 'image', { confidence: t.confidence, relation: 'platform' })));
+    }
+    return out.filter(Boolean);
+  }
+
+  function postUrl(target) {
+    const canonical = $('link[rel="canonical"]')?.href || $('meta[property="og:url"]')?.content || location.href;
+    const root = target?.closest?.('article,[role="article"]');
+    const links = [...(root?.querySelectorAll?.('a[href]') || [])].map(a => abs(a.href));
+    const pattern = /(?:youtube\.com\/(?:watch|shorts)|youtu\.be\/|instagram\.com\/(?:reel|p|tv)|facebook\.com\/(?:reel|reels|watch))/i;
+    return [canonical, ...links, location.href].map(abs).find(u => pattern.test(u)) || abs(canonical);
+  }
+
+  function collectNetwork() {
+    return Promise.resolve([]);
+  }
+
+  function plainItem(item) {
+    if (!item?.url) return null;
+    const code = item.type === 'svg' ? (item.code || svgSource(item) || '') : '';
+    if (item.type === 'svg' && /^data:/i.test(item.url) && item.url.length > 200000) return null;
+    const url = item.temporary ? item.url : liveUrl(item);
+    return {
+      url,
+      type: item.type,
+      source: item.source || '',
+      name: labelOf(item),
+      file: SL.downloadName({ ...item, url }, location.hostname),
+      width: item.width || 0,
+      height: item.height || 0,
+      px: itemPixel(item),
+      state: item.state || '',
+      temporary: !!item.temporary,
+      stream: !!item.stream,
+      audioOnly: !!item.audioOnly,
+      poster: item.poster || item.thumbnail || '',
+      family: item.family || '',
+      weight: item.weight || '',
+      style: item.style || '',
+      format: item.format || '',
+      signed: (item.flags || []).includes('signed'),
+      code: code.length < 120000 ? code : ''
+    };
+  }
+
+  function listPageMedia() {
+    try { document.documentElement.dispatchEvent(new CustomEvent('sl-extract-now')); } catch { /* ignore */ }
+    const all = dedupe([...collectPageMedia(), ...(state.platformMedia || [])])
+      .filter(item => item && !(item.type === 'video' && SL.isImageUrl(item.url)))
+      .map(plainItem).filter(Boolean);
+    let videos = [];
+    try { videos = refreshVideoItems().map(VF.plain); } catch { videos = []; }
+    videos = dedupe([...videos, ...all.filter(i => i.type === 'video')]);
+    return {
+      images: all.filter(i => i.type === 'image'),
+      videos,
+      svgs: all.filter(i => i.type === 'svg'),
+      fonts: all.filter(i => i.type === 'font'),
+      design: analyzeDesignSystem(),
+      host: location.hostname,
+      title: document.title,
+      top: window === window.top,
+      videoLocked: videoLocked()
+    };
+  }
+  window.__sourceLensList = listPageMedia;
+
+  function itemKey(item) {
+    if (item.type === 'svg') return `svg:${item.fp || item.name || item.url}`;
+    if (item.type === 'image') return `img:${canonicalImageKey(item.url)}`;
+    return item.url;
+  }
+
+  function dedupe(items) {
+    const map = new Map();
+    items.filter(Boolean).forEach(item => {
+      const key = itemKey(item);
+      const old = map.get(key);
+      if (!old) {
+        map.set(key, item);
+        return;
+      }
+      const oldPx = item.type === 'image' ? itemPixel(old) : 0;
+      const newPx = item.type === 'image' ? itemPixel(item) : 0;
+      if (newPx > oldPx) { map.set(key, item); return; }
+      if (newPx && newPx < oldPx) return;
+      if (SL.confidenceScore(item.confidence) > SL.confidenceScore(old.confidence)) map.set(key, item);
+
+    });
+    return [...map.values()];
+  }
+
+  function score(item, selected) {
+    let n = SL.confidenceScore(item.confidence);
+    if (item.element && item.element === selected) n += 80;
+    if (item.relation === 'target') n += 24;
+    if (/^https?:/i.test(item.url || '') && item.type === 'video' && !item.temporary && SL.isVideoUrl(item.url)) n += 70;
+    if (item.temporary) n -= 50;
+    if (item.stream) n -= 6;
+    return n;
+  }
+
+  function rank(items, selected) {
+    return items.sort((a, b) => score(b, selected) - score(a, selected));
+  }
+
+  function closePanel() {
+    state.observer?.disconnect();
+    state.observer = null;
+    if (state.scanTimer) clearInterval(state.scanTimer);
+    state.scanTimer = 0;
+    if (state.onScroll) window.removeEventListener('scroll', state.onScroll, true);
+    state.onScroll = null;
+    if (state.onMediaLoad) document.removeEventListener('load', state.onMediaLoad, true);
+    state.onMediaLoad = null;
+    state.redraw = null;
+    state.shadow?.querySelectorAll?.('#sl-root, .sl-lightbox, .sl-slice-editor')?.forEach(n => n.remove());
+    state.panel = null;
+    state.lightboxItem = null;
+    state.analysis = null;
+    state.design = null;
+    state.selected?.classList?.remove('sl-select');
+  }
+
+  function pageImageItem(img) {
+    if (!img || img.closest?.('#sl-host')) return null;
+    const url = abs(img.currentSrc || img.src);
+    if (!url || /\.svg(?:$|[?#])|^data:image\/svg/i.test(url)) return null;
+    const loaded = img.complete && img.naturalWidth > 0;
+    const gif = /\.gif(?:$|[?#])/i.test(url);
+    if (SL.isUiJunk(gif && loaded ? url.replace(/\.gif(?=$|[?#])/i, '.png') : url)) return null;
+    if (!SL.isImageUrl(url) && !loaded) return null;
+    const r = img.getBoundingClientRect();
+    const w = img.naturalWidth || img.width || r.width || 0;
+    const h = img.naturalHeight || img.height || r.height || 0;
+    if (Math.min(w, h) < 96) return null;
+    if (isChromeImage(img, url)) return null;
+    if (/s150x150|s320x320|_s\.(?:jpe?g|png|webp)/i.test(url) && Math.min(w, h) < 400) return null;
+    return candidate(url, '페이지 이미지', 'image', {
+      element: img, confidence: '중간', width: img.naturalWidth || 0, height: img.naturalHeight || 0, relation: 'page', allowJunk: gif
+    });
+  }
+
+  function collectPageMedia() {
+    const images = deepAll('img').map(pageImageItem).filter(Boolean);
+    const videos = deepAll('video').map(video => {
+      if (video.closest?.('#sl-host')) return null;
+      const r = video.getBoundingClientRect();
+      if (Math.min(r.width || 0, r.height || 0, video.videoWidth || r.width || 0) < 96) return null;
+      const url = abs(video.currentSrc || video.src);
+      if (url && SL.isImageUrl(url)) return null;
+      return candidate(url || 'blob:session-video', '페이지 영상', 'video', {
+        element: video, confidence: '중간', width: video.videoWidth || 0, height: video.videoHeight || 0, relation: 'page'
+      });
+    }).filter(Boolean);
+    const sources = deepAll('video source[src]').map(source => {
+      const url = abs(source.src);
+      if (!url || SL.isImageUrl(url)) return null;
+      const video = source.closest('video');
+      return candidate(url, 'video.source', 'video', {
+        element: video, confidence: '높음', width: video?.videoWidth || 0, height: video?.videoHeight || 0, relation: 'page'
+      });
+    }).filter(Boolean);
+    const audios = deepAll('audio').map(audio => {
+      if (audio.closest?.('#sl-host')) return null;
+      const r = audio.getBoundingClientRect();
+      const url = abs(audio.currentSrc || audio.src);
+      if (!url && Math.min(r.width || 0, r.height || 0) < 1) return null;
+      return candidate(url || 'blob:session-audio', '페이지 오디오', 'video', {
+        element: audio, confidence: '중간', relation: 'page', audioOnly: true
+      });
+    }).filter(Boolean);
+    const audioSources = deepAll('audio source[src]').map(source => {
+      const url = abs(source.src);
+      if (!url) return null;
+      return candidate(url, 'audio.source', 'video', {
+        element: source.closest('audio'), confidence: '높음', relation: 'page', audioOnly: true
+      });
+    }).filter(Boolean);
+    const posters = deepAll('video[poster]').map(video => candidate(video.getAttribute('poster'), '영상 포스터', 'image', {
+      confidence: '중간', relation: 'page'
+    })).filter(Boolean);
+    const svgs = collectPageSvgs();
+    const fonts = collectPageFonts();
+    const canvases = deepAll('canvas').map(canvas => {
+      if (canvas.closest?.('#sl-host')) return null;
+      const width = canvas.width || canvas.clientWidth || 0;
+      const height = canvas.height || canvas.clientHeight || 0;
+      if (width < 96 || height < 96) return null;
+      const size = `${width}x${height}`;
+      let cached = canvasCache.get(canvas);
+      let url = cached?.url;
+      try {
+        if (!url || cached?.size !== size) {
+          url = canvas.toDataURL('image/png');
+          canvasCache.set(canvas, { url, size });
+        }
+      } catch { return null; }
+      return candidate(url, '캔버스 스냅샷', 'image', {
+        element: canvas, confidence: '중간', relation: 'page', width, height, allowJunk: true
+      });
+    }).filter(Boolean);
+    let backgrounds = [];
+    try { backgrounds = collectBackgrounds(); } catch { /* ignore */ }
+    return [...images, ...videos, ...sources, ...audios, ...audioSources, ...posters, ...canvases, ...svgs, ...fonts, ...collectCatalogMedia(), ...backgrounds, ...collectSiteExtras()];
+  }
+
+  function collectSiteExtras() {
+    const kind = siteKind();
+    const out = [];
+    const push = (url, source, extra = {}) => {
+      const item = candidate(url, source, extra.hint || 'image', extra);
+      if (item) out.push(item);
+    };
+    if (kind === 'community' || /dcinside|ygosu|humoruniv|etoland|arca\.live|ppomppu|aagag/i.test(location.hostname)) {
+      $$('.writing_view_box img, .usertxt img, .gallview_contents img, .se-main-container img, #writeDiv img, .article-board img, .board-contents img, .view_content img, .td_article img').forEach(img => {
+        const url = img.currentSrc || img.src || img.getAttribute('data-original') || img.getAttribute('data-src');
+        if (url) push(url, '본문 이미지', { element: img, confidence: '높음' });
+      });
+      $$('img[src*="viewimage.php"], img[src*="dcimg"], img[src*="namu.la"], img[src*="ygosu.com"], img[src*="humoruniv"]').forEach(img => {
+        push(img.currentSrc || img.src, '커뮤니티 CDN', { element: img, confidence: '높음' });
+      });
+    }
+    if (kind === 'naver' || /blog\.naver|post\.naver|news\.naver|cafe\.naver/i.test(location.hostname + location.pathname)) {
+      $$('.se-image-resource, .se-module-image img, img._image, .se-component img, #postViewArea img').forEach(img => {
+        const url = img.getAttribute('data-lazy-src') || img.currentSrc || img.src;
+        if (url) push(url, '네이버 본문', { element: img, confidence: '최상' });
+      });
+    }
+    if (kind === 'instagram' || kind === 'facebook') {
+      $$('article img, article video, [role="dialog"] img, [role="dialog"] video').forEach(node => {
+        const url = node.currentSrc || node.src;
+        if (url) push(url, '게시물 미디어', { element: node, hint: node.tagName === 'VIDEO' ? 'video' : 'image', confidence: '최상' });
+      });
+    }
+    if (kind === 'design' || kind === 'stock') {
+      $$('img[srcset], source[srcset]').forEach(node => {
+        const last = largestSrcset(node.srcset || node.getAttribute('srcset') || '');
+        if (last) push(last, 'srcset 최대', { confidence: '최상' });
+      });
+    }
+    return out;
+  }
+
+  function collectCatalogMedia() {
+    const profile = siteProfile();
+    if (!profile.extra) return [];
+    const out = [];
+    const push = (url, source, extra = {}) => {
+      const value = abs(url);
+      if (!value || SL.isUiJunk(value) || !SL.isImageUrl(value)) return;
+      out.push(candidate(value, source, 'image', extra));
+      if (profile.upgrade) {
+        const upgraded = SL.upgradeMediaUrl(value);
+        if (upgraded && upgraded !== value) out.push(candidate(upgraded, `${source} 원본`, 'image', { ...extra, confidence: '높음' }));
+      }
+    };
+    document.querySelector('meta[property="og:image"]')?.content && push(document.querySelector('meta[property="og:image"]').content, 'og:image', { confidence: '높음' });
+    document.querySelector('meta[name="twitter:image"]')?.content && push(document.querySelector('meta[name="twitter:image"]').content, 'twitter:image', { confidence: '높음' });
+    deepAll('img, source').forEach(node => {
+      if (node.tagName === 'SOURCE' && node.parentElement?.tagName === 'VIDEO') return;
+      ['src', 'currentSrc', 'data-src', 'data-original', 'data-origin', 'data-zoom', 'data-zoom-image', 'data-lazy-src', 'data-url', 'data-image', 'data-img', 'data-orig-file', 'org_src'].forEach(attr => {
+        const v = node[attr] || node.getAttribute?.(attr);
+        if (!v) return;
+        // Only trust the element's pixel size when this attribute is what is actually displayed
+        // (a lazy data-src next to a 1×1 placeholder must not be reported as 1×1).
+        const shown = node.tagName === 'IMG' && abs(v) === abs(node.currentSrc || node.src || '');
+        push(v, attr, {
+          element: shown ? node : null,
+          confidence: '중간', width: shown ? node.naturalWidth || 0 : 0, height: shown ? node.naturalHeight || 0 : 0
+        });
+      });
+      ['srcset', 'data-srcset'].forEach(attr => {
+        const srcset = (attr === 'srcset' ? node.srcset : '') || node.getAttribute?.(attr) || '';
+        const best = largestSrcset(srcset);
+        const w = srcsetWidth(srcset, best);
+        const h = w && node.naturalWidth ? Math.round(w * node.naturalHeight / node.naturalWidth) : 0;
+        if (best) push(best, attr === 'srcset' ? 'srcset 최대' : 'data-srcset 최대', { confidence: '높음', width: w, height: h });
+      });
+    });
+    $$('[style*="background"]').slice(0, 80).forEach(node => {
+      const bg = getComputedStyle(node).backgroundImage || '';
+      const re = /url\(["']?(https?:[^"')]+)["']?\)/g;
+      let match;
+      while ((match = re.exec(bg))) push(match[1], '배경 이미지', { confidence: '중간' });
+    });
+    return out.slice(0, 120);
+  }
+
+  function collectCommerce() {
+    const out = [];
+    const push = (url, source, extra = {}) => {
+      const value = abs(url);
+      if (!value || SL.isUiJunk(value) || !SL.isImageUrl(value)) return;
+      out.push(candidate(value, source, 'image', extra));
+      const upgraded = upgradeCommerceUrl(value);
+      if (upgraded && upgraded !== value) out.push(candidate(upgraded, `${source} 원본`, 'image', { ...extra, confidence: '높음' }));
+    };
+    document.querySelector('meta[property="og:image"]')?.content && push(document.querySelector('meta[property="og:image"]').content, 'og:image', { confidence: '높음' });
+    document.querySelector('meta[name="twitter:image"]')?.content && push(document.querySelector('meta[name="twitter:image"]').content, 'twitter:image', { confidence: '높음' });
+    $$('img, source').forEach(node => {
+      ['src', 'currentSrc', 'data-src', 'data-original', 'data-origin', 'data-zoom', 'data-zoom-image', 'data-lazy-src', 'data-url', 'data-image', 'data-img'].forEach(attr => {
+        const v = node[attr] || node.getAttribute?.(attr);
+        if (v) push(v, `상품 ${attr}`, { element: node.tagName === 'IMG' ? node : null, confidence: '중간' });
+      });
+      const srcset = node.srcset || node.getAttribute?.('srcset') || '';
+      const best = largestSrcset(srcset);
+      if (best) push(best, '상품 srcset', { confidence: '높음' });
+    });
+    $$('[style*="background"]').slice(0, 50).forEach(node => {
+      const bg = getComputedStyle(node).backgroundImage || '';
+      const re = /url\(["']?(https?:[^"')]+)["']?\)/g;
+      let match;
+      while ((match = re.exec(bg))) push(match[1], '배경 이미지', { confidence: '중간' });
+    });
+    $$('script').forEach(script => {
+      const text = script.textContent || '';
+      if (text.length > 250000 || !/\.(?:jpe?g|png|webp)/i.test(text)) return;
+      const re = /https?:\/\/[^"'\\\s>]+\.(?:jpe?g|png|webp)[^"'\\\s>]*/gi;
+      let match, n = 0;
+      while ((match = re.exec(text)) && n < 30) {
+        push(match[0].replace(/\\u0026/g, '&').replace(/\\\//g, '/'), '상품 JSON', { confidence: '중간' });
+        n += 1;
+      }
+    });
+    return out.filter(Boolean);
+  }
+
+  function requestFrameMedia() {
+    const ping = { sourceLens: true, type: 'requestMedia' };
+    $$('iframe').forEach(frame => {
+      try { frame.contentWindow?.postMessage(ping, '*'); } catch { /* ignore */ }
+    });
+    for (let i = 0; i < window.frames.length; i++) {
+      try { window.frames[i].postMessage(ping, '*'); } catch { /* ignore */ }
+    }
+  }
+
+  function mergePageMedia() {
+    // Keep the collection tabs live: lazy images/SVGs, newly mounted videos,
+    // and platform/commerce media all enter the same page-level pool.
+    const incoming = [
+      ...collectPageMedia(),
+      ...(state.platformMedia || []),
+      ...collectSiteExtras(),
+      ...(isCommerce() ? collectCommerce() : [])
+    ];
+    const have = new Set(state.candidates.map(itemKey));
+    let added = 0;
+    incoming.forEach(item => {
+      if (!item?.url) return;
+      const key = itemKey(item);
+      if (have.has(key)) return;
+      have.add(key);
+      state.candidates.push(item);
+      added += 1;
+    });
+    return added;
+  }
+
+  function startPageWatch() {
+    state.observer?.disconnect();
+    if (state.scanTimer) clearInterval(state.scanTimer);
+    if (state.onMediaLoad) document.removeEventListener('load', state.onMediaLoad, true);
+    state.onMediaLoad = ev => {
+      const node = ev.target;
+      if (!state.panel || !node?.tagName) return;
+      if (node.tagName !== 'IMG' && node.tagName !== 'VIDEO' && node.tagName !== 'SVG') return;
+      if (state._loadSoon) return;
+      state._loadSoon = setTimeout(() => {
+        state._loadSoon = 0;
+        if (state.panel && mergePageMedia()) state.redraw?.();
+      }, 400);
+    };
+    document.addEventListener('load', state.onMediaLoad, true);
+    state.observer = new MutationObserver(() => {
+      if (!state.panel || state._scanSoon) return;
+      state._scanSoon = setTimeout(() => {
+        state._scanSoon = 0;
+        if (state.panel && mergePageMedia()) state.redraw?.();
+      }, 700);
+    });
+    state.observer.observe(document.documentElement, { childList: true, subtree: true });
+    // Lazy-loading pages swap image URLs while scrolling; rescan only after the user scrolled
+    // (DOM insertions are already handled by the MutationObserver above).
+    state.scrolled = false;
+    if (!state.onScroll) {
+      state.onScroll = () => { state.scrolled = true; };
+      window.addEventListener('scroll', state.onScroll, { capture: true, passive: true });
+    }
+    state.scanTimer = setInterval(() => {
+      if (!state.panel || document.hidden || !state.scrolled) return;
+      state.scrolled = false;
+      if (mergePageMedia()) state.redraw?.();
+    }, 2000);
+  }
+
+  function videoPoster(item) {
+    const urls = [];
+    let frame = '';
+    const add = value => {
+      const url = abs(value || '');
+      if (url && !urls.includes(url) && (!/^data:/i.test(url) || /^data:image\//i.test(url))) urls.push(url);
+    };
+    add(item?.poster);
+    add(item?.thumbnail);
+    const el = item?.element?.tagName === 'VIDEO' ? item.element : (item?.vid && VF?.videoByVid?.(item.vid));
+    add(el?.poster);
+    add(el?.getAttribute?.('poster'));
+    add(el?.dataset?.poster);
+    add(el?.dataset?.thumbnail);
+    const root = el?.closest?.('article,[role="article"],ytd-watch-flexy,ytd-player') || state.selected?.closest?.('article,[role="article"],ytd-watch-flexy,ytd-player');
+    root?.querySelectorAll?.('img[src],img[srcset],meta[property="og:image"],meta[name="twitter:image"]')?.forEach(node => {
+      add(node.currentSrc || node.src || node.content || node.getAttribute?.('content'));
+    });
+    document.querySelectorAll?.('meta[property="og:image"],meta[name="twitter:image"]')?.forEach(node => add(node.content));
+    const href = item?.pageUrl || item?.postUrl || state.postUrl || location.href;
+    const id = SL.youtubeIdFromUrl?.(href);
+    if (id) SL.youtubeThumbs?.(id)?.forEach(row => add(row.url));
+    const known = urls.find(url => SL.isImageUrl(url) || /\.(?:jpe?g|png|webp)(?:$|[?#])/i.test(url));
+    if (known) return known;
+    if (el && el.readyState >= 2 && el.videoWidth > 0 && el.videoHeight > 0) {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.min(el.videoWidth, 720);
+        canvas.height = Math.max(1, Math.round(canvas.width * el.videoHeight / el.videoWidth));
+        canvas.getContext('2d')?.drawImage(el, 0, 0, canvas.width, canvas.height);
+        frame = canvas.toDataURL('image/jpeg', .78);
+      } catch { /* cross-origin media cannot be rasterized; keep the honest blank state */ }
+    }
+    return frame || urls[0] || '';
+  }
+
+  function mediaNode(item, className) {
+    if (item.type === 'font') {
+      const holder = document.createElement('div');
+      holder.className = `sl-font-media ${className || ''}`;
+      const family = fontPreviewFamily(item);
+      holder.style.setProperty('--sl-preview-font', `"${family}"`);
+      holder.innerHTML = `<strong>다람쥐 헌 쳇바퀴</strong><span>The quick brown fox jumps over the lazy dog</span><small>${esc(item.family || item.format || SL.extOf(item.url, 'font'))}</small>`;
+      return holder;
+    }
+    if (item.type === 'svg' || /\.svg(?:$|[?#])/i.test(item.url || '') || /^data:image\/svg/i.test(item.url || '')) {
+      const holder = document.createElement('div');
+      holder.className = `sl-svg-media ${className || ''}`;
+      const code = item.code || svgSource(item);
+      if (code) holder.innerHTML = previewSvg(code);
+      else if (item.url) {
+        const img = document.createElement('img');
+        img.alt = item.name || 'svg';
+        img.src = item.url;
+        holder.append(img);
+      }
+      return holder;
+    }
+    if (!item.url || (/^data:/i.test(item.url) && item.type !== 'svg')) return null;
+    const urlLooksImage = SL.isImageUrl(item.url) || SL.PHOTO_EXT.test(item.url) || /^image\//i.test(item.mime || '');
+    if (item.type === 'video' && !urlLooksImage) {
+      const poster = videoPoster(item) || state.selectedMedia?.poster || '';
+      if (item.audioOnly) {
+        const node = document.createElement('audio');
+        node.className = className || '';
+        node.controls = true;
+        node.preload = 'metadata';
+        if (item.url) node.src = item.url;
+        return node;
+      }
+      const node = document.createElement('video');
+      node.className = className || '';
+      node.controls = true;
+      node.muted = true;
+      node.playsInline = true;
+      node.preload = 'metadata';
+      if (poster) node.poster = poster;
+      if (!(item.temporary || /^blob:/i.test(item.url))) node.src = item.url;
+      else if (item.url) node.src = item.url;
+      return node;
+    }
+    const node = document.createElement('img');
+    node.className = className || '';
+    node.alt = item.source || '';
+    node.referrerPolicy = 'no-referrer-when-downgrade';
+    const live = item.element?.tagName === 'IMG' && item.element.currentSrc;
+    node.src = live || item.url;
+    node.onerror = () => {
+      if (live && node.src !== item.url) node.src = item.url;
+    };
+    if (isTallItem(item) && /sl-preview|sl-lightbox-media/.test(className || '')) {
+      const wrap = document.createElement('div');
+      wrap.className = 'sl-tall-wrap';
+      wrap.append(node);
+      return wrap;
+    }
+    return node;
+  }
+
+  // Load each discovered @font-face so the preview is rendered by the actual
+  // downloaded font file, instead of the extension's UI fallback font.
+  const fontFaceCache = new Map();
+  function fontPreviewFamily(item) {
+    const source = String(item?.url || item?.family || 'font');
+    let hash = 0;
+    for (let i = 0; i < source.length; i += 1) hash = ((hash << 5) - hash + source.charCodeAt(i)) | 0;
+    const family = `LetsPickPreview${Math.abs(hash)}`;
+    const cached = fontFaceCache.get(source);
+    if (cached) return cached.family;
+    fontFaceCache.set(source, { family, status: 'loading' });
+    try {
+      if (typeof FontFace !== 'function' || !item?.url) return item?.family || family;
+      const url = String(item.url).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const face = new FontFace(family, `url("${url}")`, {
+        weight: item.weight || 'normal',
+        style: item.style || 'normal'
+      });
+      face.load().then(loaded => {
+        document.fonts.add(loaded);
+        const row = fontFaceCache.get(source);
+        if (row) row.status = 'loaded';
+      }).catch(() => {
+        const row = fontFaceCache.get(source);
+        if (row) row.status = 'failed';
+      });
+    } catch { /* invalid or cross-origin font files use the visible fallback */ }
+    return family;
+  }
+
+  const UI_ICONS = {
+    link: '<path fill="currentColor" d="M326.612 185.391c59.747 59.809 58.927 155.698.36 214.59c-.11.12-.24.25-.36.37l-67.2 67.2c-59.27 59.27-155.699 59.262-214.96 0c-59.27-59.26-59.27-155.7 0-214.96l37.106-37.106c9.84-9.84 26.786-3.3 27.294 10.606c.648 17.722 3.826 35.527 9.69 52.721c1.986 5.822.567 12.262-3.783 16.612l-13.087 13.087c-28.026 28.026-28.905 73.66-1.155 101.96c28.024 28.579 74.086 28.749 102.325.51l67.2-67.19c28.191-28.191 28.073-73.757 0-101.83c-3.701-3.694-7.429-6.564-10.341-8.569a16.04 16.04 0 0 1-6.947-12.606c-.396-10.567 3.348-21.456 11.698-29.806l21.054-21.055c5.521-5.521 14.182-6.199 20.584-1.731a152.5 152.5 0 0 1 20.522 17.197M467.547 44.449c-59.261-59.262-155.69-59.27-214.96 0l-67.2 67.2c-.12.12-.25.25-.36.37c-58.566 58.892-59.387 154.781.36 214.59a152.5 152.5 0 0 0 20.521 17.196c6.402 4.468 15.064 3.789 20.584-1.731l21.054-21.055c8.35-8.35 12.094-19.239 11.698-29.806a16.04 16.04 0 0 0-6.947-12.606c-2.912-2.005-6.64-4.875-10.341-8.569c-28.073-28.073-28.191-73.639 0-101.83l67.2-67.19c28.239-28.239 74.3-28.069 102.325.51c27.75 28.3 26.872 73.934-1.155 101.96l-13.087 13.087c-4.35 4.35-5.769 10.79-3.783 16.612c5.864 17.194 9.042 34.999 9.69 52.721c.509 13.906 17.454 20.446 27.294 10.606l37.106-37.106c59.271-59.259 59.271-155.699.001-214.959"/>',
+    copy: '<g fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"><path d="M7 9v6a4 4 0 0 0 4 4h4a2 2 0 0 1-2 2H6a4 4 0 0 1-4-4V9a4 4 0 0 1 4-4h1z"/><path d="M13 3.054V7H9.2a2 2 0 0 1 .281-.432l2.46-2.87A2 2 0 0 1 13 3.054M15 3v4a2 2 0 0 1-2 2H9v6a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></g>',
+    open: '<path fill="currentColor" d="M480 96c35.3 0 64 28.7 64 64v320c0 35.3-28.7 64-64 64H160c-35.3 0-64-28.7-64-64V160c0-35.3 28.7-64 64-64zM264 224c-9.7 0-18.5 5.8-22.2 14.8s-1.7 19.3 5.2 26.2l35 35l-67 67c-9.4 9.4-9.4 24.6 0 33.9l24 24c9.4 9.4 24.6 9.4 33.9 0l67-67l35 35c6.9 6.9 17.2 8.9 26.2 5.2S416 385.7 416 376V248c0-13.3-10.7-24-24-24z"/>',
+    newtab: '<path fill="currentColor" d="M11 3H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h5.333a4.75 4.75 0 0 1 4.417-6.5h3.5c.618 0 1.208.118 1.75.333V8h-7.75A2.25 2.25 0 0 1 11 5.75zm10 3.5V6a3 3 0 0 0-3-3h-5.5v2.75c0 .414.336.75.75.75zM23 19.25a3.75 3.75 0 0 0-3.75-3.75l-.102.007A.75.75 0 0 0 19.25 17l.154.005a2.25 2.25 0 0 1-.154 4.495l-.003.005l-.102.007a.75.75 0 0 0 .108 1.493V23l.2-.005A3.75 3.75 0 0 0 23 19.25m-6.5-3a.75.75 0 0 0-.75-.75l-.2.005a.75.75 0 0 0 .2 1.495h3.5l.102-.007A.75.75 0 0 0 19.25 20h-3.5l-.102.007A.75.75 0 0 0 15.75 17l.102-.007a2.25 2.25 0 0 0 .648-.743"/>',
+    save: '<path fill="currentColor" d="M5 21h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2M8.5 7c.83 0 1.5.67 1.5 1.5S9.33 10 8.5 10 7 9.33 7 8.5 7.67 7 8.5 7M5 17.41l3-3l1.29 1.29c.39.39 1.02.39 1.41 0l5.29-5.29l3 3V19H5v-1.59Z"/>',
+    original: '<path fill="currentColor" d="M5 21h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2M8.5 7c.83 0 1.5.67 1.5 1.5S9.33 10 8.5 10 7 9.33 7 8.5 7.67 7 8.5 7M5 17.41l3-3l1.29 1.29c.39.39 1.02.39 1.41 0l5.29-5.29l3 3V19H5v-1.59Z"/>',
+    jpg: '<path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2M9 13.5c0 1.1-.9 1.5-2 1.5s-2-.4-2-1.5V12h1.5v1.5h1V9H9zm5-2c0 .8-.7 1.5-1.5 1.5h-1v2H10V9h2.5c.8 0 1.5.7 1.5 1.5zm5-1h-2.5v3h1V12H19v1.7c0 .7-.5 1.3-1.3 1.3h-1.3c-.8 0-1.3-.7-1.3-1.3v-3.3c-.1-.7.4-1.4 1.2-1.4h1.3c.8 0 1.3.7 1.3 1.3v.2m-7.4 0h1v1h-1z"/>',
+    png: '<path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2M9 11.5c0 .8-.7 1.5-1.5 1.5h-1v2H5V9h2.5C8.3 9 9 9.7 9 10.5zm5 3.5h-1.5l-1-2.5V15H10V9h1.5l1 2.5V9H14zm5-4.5h-2.5v3h1V12H19v1.7c0 .7-.5 1.3-1.3 1.3h-1.3c-.8 0-1.3-.7-1.3-1.3v-3.3c-.1-.7.4-1.4 1.2-1.4h1.3c.8 0 1.3.7 1.3 1.3v.2zm-12.5 0h1v1h-1z"/>',
+    image: '<path d="M5 4h22a3 3 0 0 1 3 3v18a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z"/><circle cx="10" cy="11" r="3" fill="#1c1c1c"/><path d="m4 25 8-8 5 5 4-4 6 7H4Z" fill="#1c1c1c"/>',
+    video: '<path d="M4 6h16a3 3 0 0 1 3 3v2l6-4v18l-6-4v2a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3Z"/><path d="m12 11 7 5-7 5v-10Z" fill="#1c1c1c"/>',
+    code: '<path d="m12 5 3 3-6 6 6 6-3 3-9-9 9-9Zm8 0 9 9-9 9-3-3 6-6-6-6 3-3Z"/>',
+    text: '<path d="M4 5h24v5h-9v17h-6V10H4V5Z"/>',
+    slice: '<path fill="currentColor" d="M8.5 1A1.5 1.5 0 0 1 10 2.5V4H2V2.5A1.5 1.5 0 0 1 3.5 1zm2 4a.5.5 0 0 1 0 1h-9a.5.5 0 0 1 0-1zM2 7v1.5A1.5 1.5 0 0 0 3.5 10h5A1.5 1.5 0 0 0 10 8.5V7z"/>',
+    list: '<path fill="currentColor" d="M3 6.25A3.25 3.25 0 0 1 6.25 3h9.5A3.25 3.25 0 0 1 19 6.25v9.5A3.25 3.25 0 0 1 15.75 19h-9.5A3.25 3.25 0 0 1 3 15.75zm12.28 2.78a.75.75 0 0 0-1.06-1.06L10 12.19l-1.97-1.97a.75.75 0 1 0-1.06 1.06l2.5 2.5a.75.75 0 0 0 1.06 0zM6.5 20a3.25 3.25 0 0 0 2.741 1.5h7.005a5.254 5.254 0 0 0 5.254-5.254V9.241A3.25 3.25 0 0 0 19.999 6.5v9.746A3.753 3.753 0 0 1 16.246 20z"/>',
+    terminal: '<path d="M4 4h24a3 3 0 0 1 3 3v18a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z"/><path d="m8 11 5 5-5 5-3-3 2-2-2-2 3-3Zm8 8h8v4h-8v-4Z" fill="#1c1c1c"/>',
+    zip: '<path d="M6 3h22v26H6V3Zm5 4v4h4V7h-4Zm4 4v4h4v-4h-4Zm-4 6v4h8v-4h-8Zm0 7h8v4h-8v-4Z"/>',
+    methods: '<path d="M16 2a14 14 0 1 0 0 28 14 14 0 0 0 0-28Zm2 7v6l5 3-2 3-7-4V9h4Z"/>',
+    close: '<path d="m8 4 8 8 8-8 4 4-8 8 8 8-4 4-8-8-8 8-4-4 8-8-8-8 4-4Z"/>',
+    dock: '<path d="M4 5h24v22H4V5Zm4 4v14h12V9H8Zm15 0v14h1V9h-1Z"/>',
+    chevron: '<path d="m5 10 11 11 11-11 3 3-14 14L2 13l3-3Z"/>',
+    prev: '<path d="m21 4 4 4-8 8 8 8-4 4L9 16 21 4Z"/>',
+    next: '<path d="m11 4 12 12-12 12-4-4 8-8-8-8 4-4Z"/>',
+    plus: '<path d="M14 2h4v12h12v4H18v12h-4V18H2v-4h12V2Z"/>',
+    minus: '<path d="M2 14h28v4H2v-4Z"/>',
+    trash: '<path d="M5 8h22v4H5V8Zm5-5h12l2 5H8l2-5Zm-2 9h16l-1 17H9L8 12Zm5 4v10h3V16h-3Zm6 0v10h3V16h-3Z"/>'
+    ,audit: '<path fill="currentColor" d="M4.5 1.938a7 7 0 0 1 10.44 5.149c.523 3.972-2.42 4.694-5.37 3.642c-.726-.258-1.57.233-1.57 1.003V14c0 .552-.45 1.007-.997.928a7 7 0 0 1-5.765-5.116A7 7 0 0 1 4.5 1.938M4 7a1 1 0 1 0 0 2a1 1 0 0 0 0-2m1-3a1 1 0 1 0 0 2a1 1 0 0 0 0-2m6 0a1 1 0 1 0 0 2a1 1 0 0 0 0-2M8 3a1 1 0 1 0 0 2a1 1 0 0 0 0-2"/>',
+    palette: '<path d="M16 3a13 13 0 0 0 0 26h2a3 3 0 0 0 0-6h-2a2 2 0 0 1 0-4h4a9 9 0 0 0 0-16H16Zm-6 8a2 2 0 1 1 0-4 2 2 0 0 1 0 4Zm5-3a2 2 0 1 1 0-4 2 2 0 0 1 0 4Zm6 3a2 2 0 1 1 0-4 2 2 0 0 1 0 4Z"/>',
+    gradient: '<path d="M4 5h24v22H4V5Zm4 4v14h16V9H8Z"/><path d="M8 23 24 9v14H8Z" fill="#3ecf8e"/>',
+    shadow: '<path d="M7 5h18v16H7V5Zm4 4v8h10V9H11Z"/><path d="M9 24h14v3H9v-3Z" opacity=".55"/>'
+  };
+
+  const UI_ICON_VIEWS = { list: '0 0 24 24', audit: '0 0 16 16', link: '0 0 512 512', copy: '0 0 24 24', open: '0 0 640 640', newtab: '0 0 24 24', save: '0 0 24 24', original: '0 0 24 24', jpg: '0 0 24 24', png: '0 0 24 24', slice: '0 0 12 12' };
+
+  function iconSvg(name) {
+    return `<svg class="sl-btn-icon sl-icon-filled" viewBox="${UI_ICON_VIEWS[name] || '0 0 32 32'}" aria-hidden="true">${UI_ICONS[name] || UI_ICONS.link}</svg>`;
+  }
+
+  function setButtonText(button, text) {
+    if (!button) return;
+    const label = button.querySelector?.('.sl-btn-label');
+    if (label) label.textContent = text;
+    else button.textContent = text;
+  }
+
+  function actionButton(kind, label, onClick, icon = 'link') {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = kind === 'primary' ? 'sl-btn sl-btn-brand' : 'sl-btn';
+    btn.innerHTML = `${iconSvg(icon)}<span class="sl-btn-label">${esc(label)}</span>`;
+    btn.onclick = onClick;
+    return btn;
+  }
+
+  function actionGroup(title, icon, open = true) {
+    const group = document.createElement('details');
+    group.className = 'sl-action-group';
+    group.open = open;
+    const summary = document.createElement('summary');
+    summary.innerHTML = `${iconSvg(icon)}<span>${esc(title)}</span><span class="sl-group-chevron">${iconSvg('chevron')}</span>`;
+    const body = document.createElement('div');
+    body.className = 'sl-action-group-body';
+    group.append(summary, body);
+    return { group, body };
+  }
+
+  function liveUrl(item) {
+    if (!item) return '';
+    if (item.kind) return /^https?:/i.test(item.url || '') ? item.url : (item.job?.url || '');
+    if (item.temporary) return state.postUrl || item.url || '';
+    // Rewritten (guessed "original") URLs can 404 on some CDNs, so fall back to what the page really loaded.
+    const src = item.element?.currentSrc;
+    if (item.rewritten && src && /^https?:/i.test(src)) return src;
+    return item.url || src || '';
+  }
+
+  function fillItemActions(actions, item, extra = {}) {
+    actions.classList.add('sl-action-groups');
+    const source = actionGroup('원본 주소', 'link', true);
+    const save = actionGroup('저장·변환', item.type === 'video' ? 'video' : 'save', true);
+    const advanced = actionGroup('도구 더보기', 'methods', false);
+    actions.append(source.group, save.group, advanced.group);
+    source.body.append(actionButton('primary', 'URL 복사', ev => copy(liveUrl(item), ev.currentTarget), 'copy'));
+    if (extra.onUrl) source.body.append(actionButton('normal', extra.urlLabel || 'URL 보기', extra.onUrl, 'open'));
+    source.body.append(actionButton('normal', '새 탭에서 열기', () => window.open(liveUrl(item), '_blank', 'noopener'), 'newtab'));
+    if (item.type === 'image' || item.type === 'svg') {
+      save.body.append(actionButton('primary', '원본 저장', () => saveItem(item), 'original'));
+      [['JPG', 'jpg', 'image/jpeg'], ['PNG', 'png', 'image/png'], ['WebP', 'webp', 'image/webp']].forEach(([label, ext, mime]) => {
+        save.body.append(actionButton('normal', `${label} 저장`, ev => convertImage(item, { label, ext, mime }, ev.currentTarget), ext === 'jpg' ? 'jpg' : ext === 'png' ? 'png' : 'save'));
+      });
+      advanced.body.append(actionButton('normal', '분할 편집', () => { extra.onSlice?.(); openSliceEditor(item); }, 'slice'));
+    }
+    if (item.type === 'svg') {
+      advanced.body.append(actionButton('primary', '코드 복사', ev => copySvg(item, ev.currentTarget), 'code'));
+      if (extra.onCodeView) advanced.body.append(actionButton('normal', '코드 보기', extra.onCodeView, 'code'));
+    }
+    if (item.type === 'video') {
+      const video = item.element?.tagName === 'VIDEO' ? item.element : state.selectedMedia;
+      const best = VF ? VF.best(refreshVideoItems(), video || null) : null;
+      if (best) {
+        const label = state.recorder ? '녹화 멈추고 저장' : best.kind === 'drm' ? 'DRM 보호 (저장 불가)' : `영상 저장 · ${best.badge}${best.quality ? ` ${best.quality}` : ''}`;
+        const btn = actionButton('primary', label, ev => (state.recorder ? stopRecording(true) : saveVideo(best, ev.currentTarget)), best.kind === 'drm' ? 'methods' : 'video');
+        btn.title = best.note || '';
+        if (best.kind === 'drm') btn.disabled = true;
+        save.body.prepend(btn);
+        const note = document.createElement('p');
+        note.className = 'sl-vnote';
+        note.textContent = best.note || '';
+        save.body.append(note);
+      }
+      advanced.body.append(actionButton('normal', '영상 저장 방법 모두 보기', () => state.switchTab?.('video'), 'methods'));
+      advanced.body.append(actionButton('normal', 'yt-dlp 명령 복사', ev => copy(ytdlpCommand(), ev.currentTarget), 'terminal'));
+    }
+  }
+
+  function pageVideos() {
+    return $$('video').filter(v => !v.closest('#sl-host') && Math.max(v.videoWidth || 0, v.offsetWidth || 0) >= 80);
+  }
+
+  function pickCaptureVideo(item) {
+    if (item?.element?.tagName === 'VIDEO') return item.element;
+    return pageVideos().find(v => !v.paused && v.readyState >= 2)
+      || pageVideos().sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight))[0]
+      || null;
+  }
+
+  function ytdlpCommand() {
+    const url = state.postUrl || location.href;
+    return `yt-dlp --cookies-from-browser chrome -f "bv*+ba/b" --no-mtime "${url}"`;
+  }
+
+  function fmtClock(s) {
+    s = Math.max(0, Math.floor(Number(s) || 0));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }
+
+  function directVideoItem() {
+    const pool = [...(state.candidates || []), ...(state.platformMedia || []), ...collectPageMedia()];
+    return pool.find(i => i?.type === 'video' && /^https?:/i.test(i.url) && !i.temporary && !SL.isManifest(i.url) && !SL.isImageUrl(i.url));
+  }
+
+  async function oneClickSaveVideo(item, button) {
+    const setLabel = text => setButtonText(button, text);
+    if (item && !item.kind && (item.type === 'image' || item.type === 'svg' || SL.isImageUrl(item.url) || SL.PHOTO_EXT.test(item.url || ''))) {
+      saveItem(item);
+      setLabel('이미지 저장');
+      captureHud('이미지로 저장했습니다');
+      setTimeout(() => { captureHud(''); setLabel('저장'); }, 1600);
+      return { ok: true, mode: 'image' };
+    }
+    if (state.recorder) {
+      stopRecording(true);
+      return { ok: true, mode: 'stop' };
+    }
+    document.documentElement.dispatchEvent(new CustomEvent('sl-extract-now'));
+    await new Promise(r => setTimeout(r, 350));
+    if (!VF) return { ok: false, error: '영상 모듈을 불러오지 못했습니다. 페이지를 새로고침해 주세요.' };
+    const items = refreshVideoItems();
+    const video = item?.element?.tagName === 'VIDEO' ? item.element : null;
+    const target = item?.kind ? item : VF.best(items, video);
+    if (!target) {
+      setLabel('영상 없음');
+      captureHud('재생할 영상을 먼저 열어 주세요');
+      setTimeout(() => captureHud(''), 2200);
+      return { ok: false, error: '페이지에서 영상을 찾지 못했습니다. 영상을 한 번 재생한 뒤 다시 눌러 주세요.' };
+    }
+    return saveVideo(target, button);
+  }
+
+  /** Saves one video item using the right method for its kind. */
+  async function saveVideo(item, button) {
+    const setLabel = text => setButtonText(button, text);
+    if (item.kind === 'drm') {
+      toast(item.note || 'DRM 보호 영상이라 저장할 수 없습니다.', 'error');
+      return { ok: false, mode: 'drm', error: item.note || 'DRM 보호 영상이라 저장할 수 없습니다.' };
+    }
+    if (item.kind === 'direct') {
+      setLabel('저장 시작…');
+      const res = await VF.downloadDirect(item);
+      if (res?.ok) {
+        toast(`원본 영상 저장을 시작했습니다 · ${item.file || ''}`);
+        setLabel('저장됨');
+        return { ok: true, mode: 'file', file: item.file };
+      }
+      // chrome.downloads cannot always replay a session-bound CDN URL.  For
+      // reasonably sized files, retry in the extension context with cookies
+      // and the platform's configured Referer, then save the verified bytes.
+      // This is deliberately bounded so large videos continue to use the
+      // browser's streaming download instead of being buffered in memory.
+      if (!item.size || item.size <= 40 * 1024 * 1024) {
+        try {
+          const blob = await fetchBytes(item.url);
+          if (!/^video\//i.test(blob.type || '') && blob.type !== 'application/octet-stream') throw new Error(`응답 형식이 영상이 아닙니다 (${blob.type || '알 수 없음'})`);
+          const ok = await new Promise(resolve => downloadBlob(blob, item.file || VF.fileName(item, item.ext), resolve));
+          if (ok !== false) {
+            toast(`세션 권한으로 영상을 저장했습니다 · ${item.file || ''}`);
+            setLabel('저장됨');
+            return { ok: true, mode: 'file-fetch', file: item.file };
+          }
+        } catch (error) {
+          console.debug("[Let's Pick] direct fetch fallback failed", error);
+        }
+      }
+      // The file URL was refused (expired / blocked): try the next-best method for the same video.
+      const items = refreshVideoItems();
+      const alt = items.find(i => i !== item && i.group && i.group === item.group && (i.kind === 'dash' || (i.kind === 'direct' && i.url !== item.url)))
+        || items.find(i => i.kind === 'record' && (!item.element || !i.element || i.element === item.element));
+      if (alt) { toast('원본 주소가 거절되어 다른 방법으로 다시 시도합니다'); return saveVideo(alt, button); }
+      setLabel('실패');
+      const msg = `원본 주소가 거절됐습니다 (${res?.error || '알 수 없음'}). 페이지를 새로고침하고 영상을 다시 재생한 뒤 시도하거나 「녹화」를 쓰세요.`;
+      toast(msg, 'error');
+      return { ok: false, mode: 'file', error: msg };
+    }
+    if (item.kind === 'dash' || item.kind === 'hls') {
+      setLabel('새 탭에서 받는 중…');
+      const res = await VF.startJob(item);
+      if (res?.ok) {
+        toast('새 탭에서 영상을 받아 하나의 MP4로 합칩니다. 끝나면 자동 저장됩니다.');
+        return { ok: true, mode: 'stream' };
+      }
+      toast(`스트림 저장을 시작하지 못했습니다: ${res?.error || ''}`, 'error');
+      return { ok: false, mode: 'stream', error: res?.error || '' };
+    }
+    const video = item.element?.isConnected ? item.element : (item.vid ? VF.videoByVid(item.vid) : null) || pickCaptureVideo(item);
+    return startRecording(video, button);
+  }
+
+  // ------------------------------------------------------------------ recording (fallback for SABR/MSE players)
+  function recorderMime() {
+    const prefs = [
+      ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'mp4'], ['video/mp4;codecs=avc1,mp4a.40.2', 'mp4'], ['video/mp4;codecs=avc1,opus', 'mp4'],
+      ['video/webm;codecs=vp9,opus', 'webm'], ['video/webm;codecs=vp8,opus', 'webm'], ['video/webm', 'webm'], ['video/mp4', 'mp4']
+    ];
+    return prefs.find(([type]) => { try { return MediaRecorder.isTypeSupported(type); } catch { return false; } }) || ['', 'webm'];
+  }
+
+  function captureHud(text, opts = {}) {
+    let hud = uiRoot().querySelector('.sl-capture-hud');
+    if (!text) { hud?.remove(); return; }
+    if (!hud) {
+      hud = document.createElement('div');
+      hud.className = 'sl-capture-hud';
+      hud.setAttribute('role', 'status');
+      hud.innerHTML = '<span class="sl-hud-text"></span><button type="button" class="sl-hud-save">지금 저장</button><button type="button" class="sl-hud-cancel">취소</button>';
+      hud.querySelector('.sl-hud-save').onclick = ev => { ev.stopPropagation(); stopRecording(true); };
+      hud.querySelector('.sl-hud-cancel').onclick = ev => { ev.stopPropagation(); stopRecording(false); };
+      uiRoot().append(hud);
+    }
+    hud.querySelector('.sl-hud-text').textContent = text;
+    hud.classList.toggle('is-recording', !!opts.recording);
+  }
+
+  function stopRecording(keep) {
+    const rec = state.recorder;
+    if (!rec) return;
+    rec.__keep = keep;
+    try { rec.stop(); } catch { /* ignore */ }
+  }
+
+  async function startRecording(video, button) {
+    const setLabel = text => setButtonText(button, text);
+    if (!video || !(video.videoWidth || video.readyState)) {
+      captureHud('재생할 영상을 먼저 열어 주세요');
+      setTimeout(() => captureHud(''), 2200);
+      return { ok: false, mode: 'record', error: '녹화할 영상이 없습니다. 영상을 재생한 뒤 다시 눌러 주세요.' };
+    }
+    if (VF?.isDrm(video)) {
+      const msg = 'DRM 보호 영상이라 녹화해도 검은 화면만 저장됩니다. 저장할 수 없습니다.';
+      toast(msg, 'error');
+      return { ok: false, mode: 'drm', error: msg };
+    }
+    let stream = null;
+    try { stream = video.captureStream?.() || video.mozCaptureStream?.(); } catch (e) {
+      const msg = /cross-origin|insecure|security/i.test(String(e)) ? '다른 사이트 영상이라 브라우저가 녹화를 막았습니다.' : `녹화를 시작하지 못했습니다: ${e.message || e}`;
+      toast(msg, 'error');
+      return { ok: false, mode: 'record', error: msg };
+    }
+    if (!stream) return { ok: false, mode: 'record', error: '이 브라우저는 영상 녹화를 지원하지 않습니다.' };
+    const live = !Number.isFinite(video.duration) || video.duration > 4 * 3600;
+    if (!live && video.currentTime > 1 && video.duration - video.currentTime > 2) {
+      try { video.currentTime = 0; } catch { /* ignore */ }
+    }
+    const wasLoop = video.loop;
+    video.loop = false;
+    try { await video.play(); } catch { /* ignore */ }
+    // Tracks appear once playback really starts.
+    for (let i = 0; i < 20 && !stream.getVideoTracks().length; i++) await new Promise(r => setTimeout(r, 100));
+    if (!stream.getVideoTracks().length) {
+      video.loop = wasLoop;
+      return { ok: false, mode: 'record', error: '영상 화면을 가져오지 못했습니다. 영상을 재생한 뒤 다시 눌러 주세요.' };
+    }
+    const [mime, ext] = recorderMime();
+    const chunks = [];
+    let rec;
+    try {
+      rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000, audioBitsPerSecond: 192_000 } : undefined);
+    } catch (e) {
+      video.loop = wasLoop;
+      return { ok: false, mode: 'record', error: `녹화를 시작하지 못했습니다: ${e.message || e}` };
+    }
+    rec.__keep = true;
+    let lastT = video.currentTime;
+    let maxT = 0;
+    const onEnded = () => stopRecording(true);
+    const onTime = () => {
+      // Players that loop by seeking back to 0 (Instagram/Facebook reels) never fire "ended".
+      if (!live && maxT > 1 && video.currentTime + 0.5 < lastT && lastT > video.duration - 1.5) stopRecording(true);
+      lastT = video.currentTime;
+      maxT = Math.max(maxT, lastT);
+    };
+    rec.ondataavailable = ev => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+    rec.onstop = async () => {
+      video.removeEventListener('ended', onEnded);
+      video.removeEventListener('timeupdate', onTime);
+      video.loop = wasLoop;
+      clearInterval(state.captureTimer);
+      state.recorder = null;
+      state.lastRecording = null;
+      if (!rec.__keep) { captureHud('녹화를 취소했습니다'); setTimeout(() => captureHud(''), 1600); setLabel('녹화'); return; }
+      let blob = new Blob(chunks, { type: (rec.mimeType || mime || 'video/webm').split(';')[0] });
+      if (blob.size < 50_000) {
+        captureHud('녹화 파일이 비어 있습니다. 이 플레이어는 녹화가 막혀 있을 수 있습니다.');
+        setTimeout(() => captureHud(''), 3200);
+        state.lastRecording = { ok: false, size: blob.size };
+        return;
+      }
+      if (ext === 'mp4' && MT) {
+        // MediaRecorder writes fragmented MP4 without a proper duration; rewrite it as a normal, seekable MP4.
+        try {
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          const parsed = MT.parseInit(bytes);
+          MT.parseFragments(bytes, parsed);
+          const tracks = MT.alignTracks(MT.fmp4ToTracks(parsed));
+          if (tracks.length) blob = new Blob(MT.writeMp4(tracks), { type: 'video/mp4' });
+        } catch (e) { console.warn("[Let's Pick] mp4 rewrite skipped", e); }
+      }
+      const name = VF.fileName({ title: VF.title(), quality: video.videoHeight ? `${Math.min(video.videoWidth, video.videoHeight)}p-녹화` : '녹화' }, ext);
+      state.lastRecording = { ok: true, size: blob.size, mime: blob.type, name };
+      captureHud(`저장 중… (${(blob.size / 1048576).toFixed(1)}MB)`);
+      const finish = ok => {
+        captureHud(ok ? `녹화 영상을 저장했습니다 · ${name}` : '저장하지 못했습니다');
+        setLabel(ok ? '저장됨' : '실패');
+        setTimeout(() => captureHud(''), 3200);
+      };
+      if (blob.size <= 24 * 1048576) downloadBlob(blob, name, ok => finish(ok !== false));
+      else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name;
+        (state.shadow || document.documentElement).append(a);
+        a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        finish(true);
+      }
+    };
+    video.addEventListener('ended', onEnded);
+    video.addEventListener('timeupdate', onTime);
+    rec.start(1000);
+    state.recorder = rec;
+    const started = Date.now();
+    const tick = () => {
+      const d = video.duration;
+      const t = video.currentTime;
+      const pct = Number.isFinite(d) && d > 0 ? Math.min(100, Math.round((t / d) * 100)) : 0;
+      const warn = document.hidden ? ' · ⚠ 이 탭으로 돌아와 주세요' : ' · 탭을 열어 두세요';
+      captureHud(live ? `● 녹화 중 ${fmtClock((Date.now() - started) / 1000)}${warn}` : `● 녹화 중 ${fmtClock(t)} / ${fmtClock(d)} (${pct}%) · 끝나면 자동 저장${warn}`, { recording: true });
+      setLabel(live ? '녹화 중' : `녹화 ${pct}%`);
+      if (video.paused && !video.ended && Date.now() - started > 1500) video.play().catch(() => {});
+    };
+    tick();
+    state.captureTimer = setInterval(tick, 500);
+    toast(live ? '라이브 녹화를 시작했습니다. 아래 「지금 저장」을 누르면 저장됩니다.' : '녹화를 시작했습니다. 영상이 끝나면 자동으로 저장됩니다.');
+    return { ok: true, mode: live ? 'live' : 'record', mime: rec.mimeType || mime };
+  }
+
+  function videoRow(item) {
+    const row = document.createElement('article');
+    row.className = `sl-vrow is-${item.kind}${item.playing ? ' is-playing' : ''}`;
+    const poster = videoPoster(item);
+    if (poster) {
+      const thumb = document.createElement('img');
+      thumb.className = 'sl-video-thumb';
+      thumb.src = poster;
+      thumb.alt = item.title || item.source || '영상 썸네일';
+      thumb.loading = 'lazy';
+      thumb.referrerPolicy = 'no-referrer-when-downgrade';
+      thumb.onerror = () => { thumb.remove(); };
+      row.append(thumb);
+    }
+    const head = document.createElement('div');
+    head.className = 'sl-vhead';
+    const badge = document.createElement('span');
+    badge.className = `sl-vbadge k-${item.kind}`;
+    badge.textContent = item.badge || item.kind;
+    head.append(badge);
+    const facts = [item.audioOnly ? '오디오' : item.quality, item.codec, item.audio === true ? '소리 포함' : item.audio === false ? '소리 없음' : '', item.duration ? fmtClock(item.duration) : '', item.playing ? '지금 보는 영상' : ''].filter(Boolean);
+    const strong = document.createElement('strong');
+    strong.textContent = facts.join(' · ') || item.source || '';
+    head.append(strong);
+    row.append(head);
+    const note = document.createElement('p');
+    note.className = 'sl-vnote';
+    note.textContent = item.note || '';
+    row.append(note);
+    const src = document.createElement('small');
+    src.className = 'sl-meta';
+    src.textContent = item.source || '';
+    row.append(src);
+    const actions = document.createElement('div');
+    actions.className = 'sl-vactions';
+    const label = { direct: '저장', dash: '받아서 MP4로 저장', hls: '받아서 MP4로 저장', record: state.recorder ? '녹화 멈추고 저장' : '녹화해서 저장', drm: '저장 불가' }[item.kind];
+    const main = actionButton('primary', label, ev => {
+      ev.stopPropagation();
+      if (item.kind === 'record' && state.recorder) { stopRecording(true); return; }
+      saveVideo(item, ev.currentTarget);
+    });
+    if (item.kind === 'drm') main.disabled = true;
+    actions.append(main);
+    const url = liveUrl(item);
+    if (url) actions.append(actionButton('normal', '주소 복사', ev => { ev.stopPropagation(); copy(url, ev.currentTarget); }));
+    if (item.kind === 'direct') actions.append(actionButton('normal', '새 탭', ev => { ev.stopPropagation(); window.open(url, '_blank', 'noopener'); }));
+    row.append(actions);
+    return row;
+  }
+
+  function bytesToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(binary);
+  }
+
+  function blobFromBase64(base64, mime) {
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime || 'application/octet-stream' });
+  }
+
+  function fetchBytes(url) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'fetchResource', url, referer: location.href }, result => {
+        if (chrome.runtime.lastError || result?.error) return reject(new Error(result?.error || chrome.runtime.lastError.message));
+        if (result?.base64) return resolve(blobFromBase64(result.base64, result.mime));
+        if (result?.buffer) return resolve(new Blob([result.buffer], { type: result.mime || 'application/octet-stream' }));
+        reject(new Error('empty'));
+      });
+    });
+  }
+
+  function downloadBlob(blob, name, done) {
+    blob.arrayBuffer().then(buffer => {
+      chrome.runtime.sendMessage({
+        type: 'downloadBase64',
+        base64: bytesToBase64(buffer),
+        mime: blob.type || 'application/octet-stream',
+        filename: `lets-pick/${name}`
+      }, result => {
+        const err = chrome.runtime.lastError?.message;
+        done?.(!err && result?.ok !== false, err || result?.error);
+      });
+    }).catch(() => {
+      done?.(true);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      (state.shadow || document.documentElement).append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    });
+  }
+
+  function downloadName(item) {
+    return SL.downloadName(item, location.hostname);
+  }
+
+  function toast(text, kind) {
+    const root = uiRoot();
+    let el = root.querySelector('.sl-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.setAttribute('role', 'status');
+      root.append(el);
+    }
+    el.className = `sl-toast${kind === 'error' ? ' is-error' : ''}`;
+    el.textContent = text;
+    clearTimeout(state.toastTimer);
+    state.toastTimer = setTimeout(() => el.remove(), kind === 'error' ? 4200 : 2200);
+  }
+
+  function rememberCapture(items) {
+    const rec = {
+      page: location.href,
+      title: (document.title || '').slice(0, 80),
+      host: location.hostname.replace(/^www\./, ''),
+      ts: Date.now(),
+      items: (items || []).slice(0, 12).map(item => ({
+        url: item.url, type: item.type, name: item.name || fileName(item.url)
+      }))
+    };
+    try {
+      chrome.storage.local.get('slHistory', data => {
+        const list = [rec, ...(data.slHistory || []).filter(row => row.page !== rec.page)].slice(0, 20);
+        chrome.storage.local.set({ slHistory: list });
+      });
+    } catch { /* ignore */ }
+  }
+
+  function zipItems(items, button) {
+    const payload = items.slice(0, 40).map((item, i) => ({
+      url: item.url,
+      code: item.type === 'svg' ? (item.code || '') : '',
+      name: `${item.kind ? 'video' : item.type === 'svg' ? 'svg' : item.type === 'font' ? 'font' : item.type === 'video' ? 'video' : 'image'}/${String(i + 1).padStart(2, '0')}-${downloadName(item)}`
+    }));
+    if (button) { button.disabled = true; setButtonText(button, 'ZIP 만드는 중…'); }
+    chrome.runtime.sendMessage({
+      type: 'zipDownload',
+      items: payload,
+      filename: `lets-pick/${location.hostname.replace(/^www\./, '')}-media.zip`
+    }, result => {
+      if (result?.ok) {
+        if (button) {
+          button.disabled = false;
+          setButtonText(button, `ZIP ${result.count || payload.length}개`);
+          setTimeout(() => { setButtonText(button, 'ZIP 저장'); }, 1800);
+        }
+        return;
+      }
+      if (button) setButtonText(button, 'ZIP 불가 · 개별 저장');
+      payload.forEach((item, i) => {
+        const src = items[i];
+        if (src) setTimeout(() => saveItem(src), i * 320);
+      });
+      if (button) setTimeout(() => { button.disabled = false; setButtonText(button, 'ZIP 저장'); }, 2400);
+    });
+  }
+
+  function csvCell(value) {
+    return `"${String(value ?? '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
+  }
+
+  function exportMetadata(items, button) {
+    const rows = [['번호', '종류', '파일명', '원본 URL', '가로', '세로', '포맷', '용량', '상태', '출처']];
+    items.forEach((item, index) => {
+      rows.push([
+        index + 1,
+        item.type || (item.kind ? 'video' : ''),
+        downloadName(item),
+        liveUrl(item),
+        item.width || '',
+        item.height || '',
+        item.mime || item.ext || item.type || '',
+        item.size ? `${Math.round(item.size / 1024)} KB` : '',
+        item.state || item.note || '',
+        item.source || ''
+      ]);
+    });
+    const csv = '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n');
+    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `${location.hostname.replace(/^www\./, '')}-metadata.csv`, () => {
+      if (button) {
+        setButtonText(button, `CSV ${items.length}개`);
+        setTimeout(() => setButtonText(button, '메타 CSV'), 1800);
+      }
+    });
+  }
+
+  function saveItem(item, done) {
+    const name = downloadName(item);
+    const finish = (ok, err) => {
+      if (done) return done(ok, err);
+      if (ok) toast(`저장을 시작했습니다 · ${name}`);
+      else toast(err || '저장하지 못했습니다. 「새 탭」으로 연 뒤 직접 저장해 보세요.', 'error');
+    };
+    if (item.type === 'svg' && (item.code || svgSource(item))) {
+      downloadBlob(new Blob([item.code || svgSource(item)], { type: 'image/svg+xml' }), name, finish);
+      return;
+    }
+    if (item.kind) {
+      saveVideo(item).then(r => done?.(!!r?.ok, r?.error));
+      return;
+    }
+    if (item.type === 'video' && (item.temporary || /^blob:/i.test(item.url || '') || /googlevideo|videoplayback/.test(item.url || ''))) {
+      oneClickSaveVideo(item).then(r => finish(!!r?.ok, r?.error));
+      return;
+    }
+    const url = liveUrl(item);
+    const locked = u => SL.SIGNED.test(u || '') || /cdninstagram|fbcdn\.net|scontent/i.test(u || '');
+    if (/^https?:/i.test(url) && !item.temporary) {
+      chrome.runtime.sendMessage({ type: 'downloadUrl', url, filename: `lets-pick/${name}` }, result => {
+        void chrome.runtime.lastError;
+        if (result?.ok) return finish(true);
+        if (locked(url)) return finish(false, '서명·만료가 걸린 주소라 저장되지 않았습니다. 페이지를 새로고침한 뒤 다시 시도해 보세요.');
+        fetchBytes(url).then(blob => downloadBlob(blob, name, finish)).catch(e => finish(false, `저장 실패: ${e.message || e}`));
+      });
+      return;
+    }
+    if (locked(url)) return finish(false, '서명·만료가 걸린 주소라 저장되지 않았습니다.');
+    fetchBytes(item.url).then(blob => downloadBlob(blob, name, finish)).catch(() => {
+      if (state.postUrl) window.open(state.postUrl, '_blank', 'noopener');
+      finish(false, '이 항목은 바로 저장할 수 없습니다.');
+    });
+  }
+
+  function copy(value, button) {
+    const done = () => {
+      if (!button) { toast(String(value).includes('\n') ? `${String(value).split('\n').length}개 URL을 복사했습니다` : '복사했습니다'); return; }
+      const prev = button.querySelector?.('.sl-btn-label')?.textContent || button.textContent;
+      setButtonText(button, '복사됨');
+      setTimeout(() => { setButtonText(button, prev); }, 1200);
+    };
+    navigator.clipboard?.writeText(value).then(done).catch(() => {
+      const area = document.createElement('textarea');
+      area.value = value;
+      document.body.append(area);
+      area.select();
+      document.execCommand('copy');
+      area.remove();
+      done();
+    });
+  }
+
+  const metaCache = new Map();
+  const metaQueue = [];
+  let metaActive = 0;
+  let metaObserver = null;
+
+  function pumpMeta() {
+    while (metaActive < 4 && metaQueue.length) {
+      const job = metaQueue.shift();
+      metaActive += 1;
+      const finish = result => { metaActive -= 1; job.resolve(result || {}); pumpMeta(); };
+      try {
+        chrome.runtime.sendMessage({ type: 'resourceMeta', url: job.url, referer: location.href }, result => {
+          void chrome.runtime.lastError;
+          finish(result);
+        });
+      } catch { finish({}); }
+    }
+  }
+
+  function fetchMeta(url) {
+    if (metaCache.has(url)) return metaCache.get(url);
+    const pending = new Promise(resolve => { metaQueue.push({ url, resolve }); pumpMeta(); });
+    metaCache.set(url, pending);
+    if (metaCache.size > 600) metaCache.delete(metaCache.keys().next().value);
+    return pending;
+  }
+
+  function hydrateMeta(item, node) {
+    const apply = () => {
+      const meta = node?.querySelector?.('.sl-meta');
+      if (meta) {
+        const dim = item.width && item.height ? `${item.width}×${item.height}` : '';
+        const size = item.size ? bytes(item.size) : '';
+        meta.textContent = [dim, item.mime || item.type, size, item.state].filter(Boolean).join(' · ');
+      }
+      const badge = node?.querySelector?.('.sl-dim');
+      if (badge) {
+        const px = item.width && item.height ? `${item.width}×${item.height}` : item.width ? `폭 ${item.width}px` : '';
+        badge.textContent = [px, item.size ? bytes(item.size) : ''].filter(Boolean).join(' · ');
+        badge.hidden = !badge.textContent;
+      }
+    };
+    apply();
+    if (!/^https?:/i.test(item.url || '') || (item.size && item.mime)) return;
+    const run = () => fetchMeta(item.url).then(result => {
+      if (result?.size) item.size = result.size;
+      if (result?.mime) {
+        item.mime = result.mime.split(';')[0];
+        if (/^image\//i.test(item.mime) && !/^image\/svg/i.test(item.mime)) item.type = 'image';
+        if (/^video\//i.test(item.mime)) item.type = 'video';
+      }
+      apply();
+    });
+    if (!node || typeof IntersectionObserver !== 'function') { run(); return; }
+    if (!metaObserver) {
+      metaObserver = new IntersectionObserver(entries => entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        metaObserver.unobserve(entry.target);
+        entry.target.__slMeta?.();
+        entry.target.__slMeta = null;
+      }), { rootMargin: '200px' });
+    }
+    node.__slMeta = run;
+    metaObserver.observe(node);
+  }
+
+  function imageBlob(item) {
+    const urls = [...new Set([item.url, item.element?.currentSrc, item.element?.src].filter(url => /^(?:https?:|blob:)/i.test(url || '')))];
+    let attempt = Promise.reject(new Error('image URL unavailable'));
+    urls.forEach(url => {
+      attempt = attempt.catch(() => fetchBytes(url))
+        .catch(() => fetch(url, { credentials: 'omit', mode: 'cors' }).then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.blob();
+        }))
+        .catch(() => fetch(url, { credentials: 'include' }).then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.blob();
+        }));
+    });
+    return attempt;
+  }
+
+  function convertImage(item, format, button) {
+    const prev = button?.textContent;
+    if (button) setButtonText(button, '변환 중…');
+    const name = `${(fileName(item.url) || 'image').replace(/\.[^.]+$/, '')}.${format.ext}`;
+    const done = (ok, err) => {
+      if (button) setButtonText(button, ok ? '저장됨' : '변환 실패');
+      if (!ok) console.warn("[Let's Pick] convert", err);
+      setTimeout(() => { if (button) setButtonText(button, prev); }, 1800);
+    };
+    if (item.type === 'svg' && item.code) {
+      const image = new Image();
+      image.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, image.naturalWidth);
+        canvas.height = Math.max(1, image.naturalHeight);
+        const ctx = canvas.getContext('2d');
+        if (format.mime === 'image/jpeg') {
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+        ctx.drawImage(image, 0, 0);
+        canvas.toBlob(blob => {
+          if (!blob) return done(false, 'toBlob');
+          downloadBlob(blob, name);
+          done(true);
+        }, format.mime, 0.92);
+      };
+      image.onerror = () => done(false, 'svg decode');
+      image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(item.code)}`;
+      return;
+    }
+    chrome.runtime.sendMessage({
+      type: 'convertAndDownload',
+      url: item.url,
+      mime: format.mime,
+      filename: `lets-pick/${name}`
+    }, result => {
+      if (chrome.runtime.lastError) return done(false, chrome.runtime.lastError.message);
+      done(!!result?.ok, result?.error);
+    });
+  }
+
+  function openLightbox(item, items, index) {
+    const layer = document.createElement('div');
+    layer.className = 'sl-lightbox';
+    const card = document.createElement('div');
+    card.className = 'sl-lightbox-card';
+    const close = document.createElement('button');
+    close.className = 'sl-lightbox-close';
+    close.innerHTML = iconSvg('close');
+    close.onclick = () => { layer.remove(); state.lightboxItem = null; };
+    close.title = '닫기 (Esc)';
+    state.lightboxItem = item;
+    const prev = document.createElement('button');
+    prev.className = 'sl-lightbox-nav sl-lightbox-prev';
+    prev.innerHTML = iconSvg('prev');
+    const next = document.createElement('button');
+    next.className = 'sl-lightbox-nav sl-lightbox-next';
+    next.innerHTML = iconSvg('next');
+    prev.title = '이전 항목';
+    next.title = '다음 항목';
+    if (items.length < 2) { prev.hidden = true; next.hidden = true; }
+    prev.onclick = () => { layer.remove(); openLightbox(items[(index - 1 + items.length) % items.length], items, (index - 1 + items.length) % items.length); };
+    next.onclick = () => { layer.remove(); openLightbox(items[(index + 1) % items.length], items, (index + 1) % items.length); };
+    const preview = mediaNode(item, 'sl-lightbox-media');
+    card.append(close, prev, next);
+    if (preview) card.append(preview);
+    const title = document.createElement('div');
+    title.className = 'sl-file-meta';
+    title.textContent = `${labelOf(item)} · ${item.state || ''}`;
+    const page = document.createElement('div');
+    page.className = 'sl-lightbox-page';
+    page.textContent = `${index + 1} / ${items.length} · 좌우 방향키로 넘기기`;
+    const actions = document.createElement('div');
+    actions.className = 'sl-lightbox-actions';
+    fillItemActions(actions, item, { onSlice: () => layer.remove() });
+    card.append(title, page, actions);
+    layer.append(card);
+    layer.onclick = ev => { if (ev.target === layer) { layer.remove(); state.lightboxItem = null; } };
+    uiRoot().querySelectorAll('.sl-lightbox').forEach(n => n.remove());
+    uiRoot().activeElement?.blur?.();
+    uiRoot().append(layer);
+    layer.tabIndex = -1;
+    try { layer.focus({ preventScroll: true }); } catch { /* ignore */ }
+  }
+
+  async function openSliceEditor(item) {
+    let blob;
+    try {
+      blob = item.type === 'svg' && item.code
+        ? new Blob([item.code], { type: 'image/svg+xml' })
+        : await imageBlob(item);
+    } catch (error) {
+      const note = document.createElement('div');
+      note.className = 'sl-lightbox';
+      note.innerHTML = `<div class="sl-lightbox-card"><p class="sl-session-note">이미지를 불러오지 못해 분할할 수 없습니다. ${esc(String(error.message || error))}</p><button class="sl-btn" type="button">닫기</button></div>`;
+      note.querySelector('button').onclick = () => note.remove();
+      uiRoot().append(note);
+      return;
+    }
+
+    const sourceUrl = URL.createObjectURL(blob);
+    const image = new Image();
+    image.onload = () => {
+      const layer = document.createElement('div');
+      layer.className = 'sl-slice-editor';
+      layer.innerHTML = `<div class="sl-slice-card"><button class="sl-slice-close" type="button">×</button>
+        <header class="sl-slice-header"><div><h3>이미지 분할 편집</h3><small>가로선은 지금 보는 화면 가운데에 추가됩니다. 선을 드래그하거나 ×로 삭제하세요.</small></div>
+        <div class="sl-slice-tools">
+          <button class="sl-btn sl-slice-add" type="button">+ 가로선</button>
+          <button class="sl-btn sl-slice-del" type="button">선 삭제</button>
+          <button class="sl-btn sl-slice-clear" type="button">모두 지우기</button>
+          <button class="sl-btn sl-zoom-out" type="button">−</button>
+          <span class="sl-zoom-label">100%</span>
+          <button class="sl-btn sl-zoom-in" type="button">+</button>
+          <button class="sl-btn sl-zoom-fit" type="button">맞춤</button>
+          <select class="sl-slice-format"><option value="jpg">JPG</option><option value="png">PNG</option><option value="webp">WebP</option></select>
+          <button class="sl-btn sl-slice-export" type="button">분할 저장</button>
+        </div></header>
+        <div class="sl-slice-viewport"><div class="sl-slice-stage"><img class="sl-slice-image" alt=""><div class="sl-slice-lines"></div></div></div>
+        <footer class="sl-slice-footer"><span class="sl-slice-count"></span><span>${image.naturalWidth}×${image.naturalHeight}px</span></footer></div>`;
+      layer.querySelector('.sl-slice-close').innerHTML = iconSvg('close');
+      layer.querySelector('.sl-slice-add').innerHTML = `${iconSvg('plus')}<span>가로선</span>`;
+      layer.querySelector('.sl-zoom-out').innerHTML = iconSvg('minus');
+      layer.querySelector('.sl-zoom-in').innerHTML = iconSvg('plus');
+      layer.querySelector('.sl-zoom-out').setAttribute('aria-label', '축소');
+      layer.querySelector('.sl-zoom-in').setAttribute('aria-label', '확대');
+      const viewport = layer.querySelector('.sl-slice-viewport');
+      const preview = layer.querySelector('.sl-slice-image');
+      const linesEl = layer.querySelector('.sl-slice-lines');
+      const countEl = layer.querySelector('.sl-slice-count');
+      const zoomLabel = layer.querySelector('.sl-zoom-label');
+      const positions = [];
+      let selected = -1;
+      let zoom = 1;
+      preview.src = sourceUrl;
+      const applyZoom = () => {
+        preview.style.maxWidth = 'none';
+        preview.style.width = `${Math.round(zoom * 100)}%`;
+        zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+      };
+      applyZoom();
+      const close = () => { URL.revokeObjectURL(sourceUrl); layer.remove(); };
+      layer.querySelector('.sl-slice-close').onclick = close;
+      layer.onclick = ev => { if (ev.target === layer) close(); };
+      const renderLines = () => {
+        linesEl.textContent = '';
+        positions.sort((a, b) => a - b);
+        if (selected >= positions.length) selected = positions.length - 1;
+        positions.forEach((position, lineIndex) => {
+          const line = document.createElement('div');
+          line.className = `sl-slice-line${selected === lineIndex ? ' is-selected' : ''}`;
+          line.style.top = `${position * 100}%`;
+          const del = document.createElement('button');
+          del.type = 'button';
+          del.className = 'sl-slice-line-x';
+          del.innerHTML = iconSvg('close');
+          del.title = '이 선 삭제';
+          del.onclick = ev => {
+            ev.stopPropagation();
+            positions.splice(lineIndex, 1);
+            selected = -1;
+            renderLines();
+          };
+          let dragging = false;
+          const move = ev => {
+            if (!dragging) return;
+            const rect = preview.getBoundingClientRect();
+            positions[lineIndex] = Math.max(0.01, Math.min(0.99, (ev.clientY - rect.top) / rect.height));
+            line.style.top = `${positions[lineIndex] * 100}%`;
+          };
+          line.onpointerdown = ev => {
+            if (ev.target === del) return;
+            selected = lineIndex;
+            dragging = true;
+            line.classList.add('is-selected');
+            line.setPointerCapture?.(ev.pointerId);
+            window.addEventListener('pointermove', move);
+            window.addEventListener('pointerup', () => {
+              dragging = false;
+              window.removeEventListener('pointermove', move);
+              renderLines();
+            }, { once: true });
+          };
+          line.append(del);
+          linesEl.append(line);
+        });
+        countEl.textContent = positions.length ? `${positions.length + 1}개 이미지로 분할` : '가로선을 추가하세요';
+      };
+      layer.querySelector('.sl-slice-add').onclick = () => {
+        const view = viewport.getBoundingClientRect();
+        const stage = preview.getBoundingClientRect();
+        const visibleTop = Math.max(view.top, stage.top);
+        const visibleBottom = Math.min(view.bottom, stage.bottom);
+        const y = (visibleTop + visibleBottom) / 2;
+        const pos = (y - stage.top) / Math.max(1, stage.height);
+        if (positions.length < 40) {
+          positions.push(Math.max(0.01, Math.min(0.99, pos)));
+          selected = positions.length - 1;
+        }
+        renderLines();
+      };
+      layer.querySelector('.sl-slice-del').onclick = () => {
+        if (selected < 0 && positions.length) selected = positions.length - 1;
+        if (selected < 0) return;
+        positions.splice(selected, 1);
+        selected = Math.min(selected, positions.length - 1);
+        renderLines();
+      };
+      layer.querySelector('.sl-slice-clear').onclick = () => {
+        positions.splice(0, positions.length);
+        selected = -1;
+        renderLines();
+      };
+      const setZoom = next => {
+        zoom = Math.min(4, Math.max(0.25, Math.round(next * 20) / 20));
+        applyZoom();
+      };
+      layer.querySelector('.sl-zoom-in').onclick = () => setZoom(zoom + 0.25);
+      layer.querySelector('.sl-zoom-out').onclick = () => setZoom(zoom - 0.25);
+      layer.querySelector('.sl-zoom-fit').onclick = () => setZoom(1);
+      viewport.addEventListener('wheel', ev => {
+        if (!ev.ctrlKey && !ev.metaKey) return;
+        ev.preventDefault();
+        setZoom(zoom + (ev.deltaY > 0 ? -0.1 : 0.1));
+      }, { passive: false });
+      layer.addEventListener('keydown', ev => {
+        if (ev.key === 'Delete' || ev.key === 'Backspace') {
+          ev.preventDefault();
+          layer.querySelector('.sl-slice-del').click();
+        }
+      });
+      layer.tabIndex = 0;
+      layer.focus();
+      layer.querySelector('.sl-slice-export').onclick = async ev => {
+        const button = ev.currentTarget;
+        button.disabled = true;
+        const value = layer.querySelector('.sl-slice-format').value;
+        const chosen = value === 'jpg' ? { ext: 'jpg', mime: 'image/jpeg' } : value === 'webp' ? { ext: 'webp', mime: 'image/webp' } : { ext: 'png', mime: 'image/png' };
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const cuts = [0, ...positions.slice().sort((a, b) => a - b), 1];
+        const base = fileName(item.url).replace(/\.[^.]+$/, '') || 'image';
+        for (let i = 0; i < cuts.length - 1; i++) {
+          const top = Math.round(cuts[i] * image.naturalHeight);
+          const bottom = Math.round(cuts[i + 1] * image.naturalHeight);
+          canvas.width = image.naturalWidth;
+          canvas.height = Math.max(1, bottom - top);
+          ctx.drawImage(image, 0, top, image.naturalWidth, canvas.height, 0, 0, canvas.width, canvas.height);
+          const output = await new Promise((resolve, reject) => canvas.toBlob(b => b ? resolve(b) : reject(), chosen.mime, 0.92));
+          downloadBlob(output, `${base}-slice-${String(i + 1).padStart(2, '0')}.${chosen.ext}`);
+        }
+        setButtonText(button, '저장 완료');
+        button.disabled = false;
+      };
+      uiRoot().append(layer);
+      renderLines();
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(sourceUrl);
+      const note = document.createElement('div');
+      note.className = 'sl-session-note';
+      note.textContent = '이미지를 불러오지 못해 분할할 수 없습니다.';
+      uiRoot().querySelector('#sl-panel')?.append(note);
+      setTimeout(() => note.remove(), 2500);
+    };
+    image.src = sourceUrl;
+  }
+
+  function visibleList() {
+    const tab = state.activeTab;
+    if (tab === 'selected') {
+      const picked = state.picked || state.candidates[0];
+      return picked ? [picked] : [];
+    }
+    if (tab === 'design') {
+      if (state.designSubtab === 'font' || state.designSubtab === 'svg') {
+        let list = state.candidates.filter(item => item.type === state.designSubtab);
+        const q = state.query.trim().toLowerCase();
+        if (q) list = list.filter(item => `${labelOf(item)} ${item.family || ''} ${item.format || ''} ${item.source || ''}`.toLowerCase().includes(q));
+        return state.designSubtab === 'font'
+          ? list.map((item, i) => ({ item, i, px: itemPixel(item) })).sort((a, b) => (b.px - a.px) || (a.i - b.i)).map(row => row.item)
+          : list;
+      }
+      return [];
+    }
+    if (tab === 'video') {
+      const q = state.query.trim().toLowerCase();
+      const list = dedupe([...(state.videoItems || []), ...state.candidates.filter(item => item.type === 'video')]);
+      return q ? list.filter(i => `${i.note} ${i.source} ${i.quality} ${i.badge} ${i.url || ''}`.toLowerCase().includes(q)) : list;
+    }
+    let list = state.candidates.filter(item => item.type === tab);
+    if (tab === 'image' && state.minPx) list = list.filter(item => itemPixel(item) >= state.minPx);
+    const q = state.query.trim().toLowerCase();
+    if (q) {
+      const words = q.split(/\s+/);
+      list = list.filter(item => {
+        const hay = `${labelOf(item)} ${/^data:/i.test(item.url || '') ? '' : item.url} ${item.source || ''}`.toLowerCase();
+        return words.every(word => hay.includes(word));
+      });
+    }
+    if (state.sort === 'big' && tab !== 'svg') {
+      list = list.map((item, i) => ({ item, i, px: itemPixel(item) }))
+        .sort((a, b) => (b.px - a.px) || (a.i - b.i))
+        .map(row => row.item);
+    }
+    return list;
+  }
+
+  function bulkTargets(list) {
+    const chosen = list.filter(item => state.selectedKeys.has(itemKey(item)));
+    return chosen.length ? chosen : list;
+  }
+
+  function applyPanelPosition(panel) {
+    const position = state.panelPosition;
+    if (!position || !Number.isFinite(position.left) || !Number.isFinite(position.top)) return;
+    const width = panel.getBoundingClientRect().width || 440;
+    const height = panel.getBoundingClientRect().height || 240;
+    const left = Math.max(8, Math.min(Math.max(8, window.innerWidth - width - 8), position.left));
+    const top = Math.max(8, Math.min(Math.max(8, window.innerHeight - height - 8), position.top));
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+    panel.style.right = 'auto';
+    panel.classList.remove('is-left');
+  }
+
+  function enablePanelDrag(panel) {
+    const handle = panel.querySelector('.sl-topbar');
+    if (!handle) return;
+    handle.classList.add('sl-drag-handle');
+    let drag = null;
+    const onMove = event => {
+      if (!drag) return;
+      const rect = panel.getBoundingClientRect();
+      const left = Math.max(8, Math.min(Math.max(8, window.innerWidth - rect.width - 8), drag.left + event.clientX - drag.x));
+      const top = Math.max(8, Math.min(Math.max(8, window.innerHeight - rect.height - 8), drag.top + event.clientY - drag.y));
+      panel.style.left = `${left}px`;
+      panel.style.top = `${top}px`;
+      panel.style.right = 'auto';
+      panel.classList.remove('is-left');
+    };
+    const stop = () => {
+      if (!drag) return;
+      const pointerId = drag.pointerId;
+      const left = parseFloat(panel.style.left);
+      const top = parseFloat(panel.style.top);
+      drag = null;
+      handle.releasePointerCapture?.(pointerId);
+      window.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('pointerup', stop, true);
+      window.removeEventListener('pointercancel', stop, true);
+      if (Number.isFinite(left) && Number.isFinite(top)) {
+        state.panelPosition = { left, top };
+        savePrefs({ panelPosition: state.panelPosition });
+      }
+    };
+    handle.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || event.target.closest('button')) return;
+      const rect = panel.getBoundingClientRect();
+      drag = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top, pointerId: event.pointerId };
+      panel.style.left = `${rect.left}px`;
+      panel.style.top = `${rect.top}px`;
+      panel.style.right = 'auto';
+      panel.classList.remove('is-left');
+      handle.setPointerCapture?.(event.pointerId);
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', stop, true);
+      window.addEventListener('pointercancel', stop, true);
+      event.preventDefault();
+    });
+  }
+
+  function render() {
+    // Rebuilding the panel is part of every inspection. Preserve the current
+    // analysis payload while tearing down the previous DOM; otherwise
+    // closePanel() would erase it before drawSelected() can render the CSS card.
+    const analysis = state.analysis;
+    const design = state.design;
+    closePanel();
+    state.analysis = analysis;
+    state.design = design;
+    refreshVideoItems();
+    const shadow = uiRoot();
+    const root = document.createElement('div');
+    root.id = 'sl-root';
+    const panel = document.createElement('section');
+    panel.id = 'sl-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', "Let's Pick");
+    if (state.dock === 'left') panel.classList.add('is-left');
+    root.append(panel);
+    state.panel = root;
+    shadow.append(root);
+    const brand = (typeof sourceLensProfileFor === 'function' ? sourceLensProfileFor(location.hostname) : null)?.brand
+      || { name: siteKind(), color: '#229968' };
+    panel.innerHTML = `
+      <header class="sl-topbar">
+        <h2>Let's Pick <small class="sl-ver">${esc(VERSION)}</small></h2>
+        <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
+        <span class="sl-spacer"></span>
+        <button class="sl-icon-btn sl-dock" type="button" title="패널을 반대쪽으로 옮기기" aria-label="패널 위치 바꾸기">${iconSvg('dock')}</button>
+        <button class="sl-icon-btn sl-close" type="button" title="닫기 (Esc)" aria-label="닫기">${iconSvg('close')}</button>
+      </header>
+      <nav class="sl-tabs" role="tablist">
+        <button data-tab="selected" title="단축키 1">${iconSvg('list')}<span class="sl-tab-label">선택</span></button>
+        <button data-tab="image" title="단축키 2">${iconSvg('image')}<span class="sl-tab-label">이미지</span> <b>0</b></button>
+        <button data-tab="video" title="단축키 3">${iconSvg('video')}<span class="sl-tab-label">영상</span> <b>0</b></button>
+        <button data-tab="design" title="단축키 4">${iconSvg('audit')}<span class="sl-tab-label">디자인</span></button>
+      </nav>
+      <nav class="sl-design-tabs" role="tablist" hidden>
+        <button data-design-tab="overview">${iconSvg('audit')}<span>종합</span></button>
+        <button data-design-tab="font">${iconSvg('text')}<span>글꼴</span> <b>0</b></button>
+        <button data-design-tab="css">${iconSvg('code')}<span>CSS</span></button>
+        <button data-design-tab="svg">${iconSvg('code')}<span>SVG</span> <b>0</b></button>
+      </nav>
+      <div class="sl-tools"></div>
+      <main class="sl-main"></main>
+      <footer class="sl-foot">Alt(⌥)+클릭: 다른 요소 분석 · <kbd>1</kbd>–<kbd>4</kbd> 기본 메뉴 · 디자인 하위 메뉴 · <kbd>/</kbd> 검색 · <kbd>S</kbd> 저장 · <kbd>C</kbd> 복사 · <kbd>Esc</kbd> 닫기</footer>`;
+    applyPanelPosition(panel);
+    $('.sl-close', panel).onclick = closePanel;
+    enablePanelDrag(panel);
+    $('.sl-dock', panel).onclick = () => {
+      state.dock = state.dock === 'left' ? 'right' : 'left';
+      state.panelPosition = null;
+      panel.style.left = '';
+      panel.style.top = '';
+      panel.style.right = '';
+      panel.classList.toggle('is-left', state.dock === 'left');
+      savePrefs({ dock: state.dock, panelPosition: null });
+    };
+    const tools = $('.sl-tools', panel);
+    const main = $('.sl-main', panel);
+    let rendered = new Set();
+    let grid = null;
+
+    const updateCounts = () => {
+      panel.querySelector('[data-tab="image"] b').textContent = state.candidates.filter(i => i.type === 'image').length;
+      const videoBtn = panel.querySelector('[data-tab="video"]');
+      const videoCount = videoBtn.querySelector('b');
+      if (videoCount) videoCount.textContent = dedupe([...(state.videoItems || []), ...state.candidates.filter(item => item.type === 'video')]).filter(i => i.kind !== 'drm').length;
+      panel.querySelector('[data-design-tab="svg"] b').textContent = state.candidates.filter(i => i.type === 'svg').length;
+      panel.querySelector('[data-design-tab="font"] b').textContent = state.candidates.filter(i => i.type === 'font').length;
+    };
+
+    const updateBulk = () => {
+      const list = visibleList();
+      const chosen = list.filter(item => state.selectedKeys.has(itemKey(item))).length;
+      const set = (sel, text) => { const el = tools.querySelector(sel); if (el && !el.disabled) setButtonText(el, text); };
+      const n = chosen || list.length;
+      set('.sl-act-save', `저장 (${n})`);
+      set('.sl-act-zip', `ZIP (${Math.min(n, ZIP_MAX)})`);
+      set('.sl-act-copy', `URL 복사 (${n})`);
+      const all = tools.querySelector('.sl-select-all');
+      if (all) {
+        all.checked = list.length > 0 && chosen === list.length;
+        all.indeterminate = chosen > 0 && chosen < list.length;
+      }
+      const note = tools.querySelector('.sl-select-note');
+      if (note) note.textContent = chosen
+        ? `${chosen}개 선택됨 — 아래 버튼은 선택한 것만 처리`
+        : `${list.length}개 · 페이지 전체 자동 수집 · 스크롤하면 계속 추가`;
+      tools.querySelectorAll('.sl-bulk .sl-btn').forEach(btn => { if (!btn.dataset.busy) btn.disabled = !list.length; });
+    };
+
+    const makeTile = item => {
+      if (item.kind) return videoRow(item);
+      const tile = document.createElement('article');
+      tile.className = 'sl-tile';
+      const key = itemKey(item);
+      if (state.selectedKeys.has(key)) tile.classList.add('is-checked');
+      const check = document.createElement('label');
+      check.className = 'sl-check';
+      check.title = '선택';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = state.selectedKeys.has(key);
+      box.onchange = () => {
+        if (box.checked) state.selectedKeys.add(key); else state.selectedKeys.delete(key);
+        tile.classList.toggle('is-checked', box.checked);
+        updateBulk();
+      };
+      check.onclick = ev => ev.stopPropagation();
+      check.append(box);
+      tile.append(check);
+      const preview = mediaNode(item, 'sl-tile-preview');
+      if (preview) tile.append(preview);
+      const dim = document.createElement('span');
+      dim.className = 'sl-dim';
+      dim.hidden = true;
+      tile.append(dim);
+      tile.insertAdjacentHTML('beforeend', `<strong title="${esc(labelOf(item))}">${esc(labelOf(item))}</strong><small>${esc(item.source)}</small><small class="sl-meta">${esc(item.state)}</small>`);
+      const quick = document.createElement('div');
+      quick.className = 'sl-quick';
+      const qb = (label, title, fn, icon) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.innerHTML = `${iconSvg(icon)}<span class="sl-btn-label">${esc(label)}</span>`;
+        b.title = title;
+        b.onclick = ev => { ev.stopPropagation(); fn(ev.currentTarget); };
+        quick.append(b);
+      };
+      qb('저장', '이 파일 저장', () => saveItem(item), 'save');
+      qb('복사', 'URL 복사', btn => (item.type === 'svg' ? copySvg(item, btn) : copy(liveUrl(item), btn)), 'copy');
+      tile.append(quick);
+      hydrateMeta(item, tile);
+      tile.onclick = () => {
+        const list = visibleList();
+        const index = Math.max(0, list.indexOf(item));
+        openLightbox(item, list, index);
+      };
+      rendered.add(key);
+      return tile;
+    };
+
+    const emptyText = () => {
+      if (state.activeTab === 'video') return videoEmptyMessage();
+      if (state.query.trim()) return `「${state.query.trim()}」에 맞는 항목이 없습니다. 검색어를 지워 보세요.`;
+      if (state.activeTab === 'design' && state.designSubtab === 'svg') return '표시할 SVG가 없습니다. 아이콘을 직접 Alt(⌥)+클릭해 보세요.';
+      if (state.activeTab === 'design' && state.designSubtab === 'font') return '페이지에서 @font-face 글꼴을 찾지 못했습니다.';
+      if (state.activeTab === 'image' && state.minPx) return `${state.minPx}px 이상 이미지가 없습니다. 크기 필터를 「모든 크기」로 바꿔 보세요.`;
+      if (state.activeTab === 'selected') return '분석한 요소가 없습니다. 이미지·영상을 Alt(⌥)+클릭하거나 「이미지」 탭을 보세요.';
+      return '표시할 미디어가 없습니다. 페이지를 스크롤해 이미지를 불러온 뒤 다시 확인하세요.';
+    };
+
+    const renderGrid = () => {
+      main.textContent = '';
+      rendered = new Set();
+      grid = null;
+      const list = visibleList();
+      if (!list.length) {
+        const box = document.createElement('div');
+        box.className = 'sl-empty';
+        box.textContent = emptyText();
+        main.append(box);
+        updateBulk();
+        return;
+      }
+      grid = document.createElement('div');
+      grid.className = state.activeTab === 'video' ? 'sl-vlist' : `sl-grid${state.activeTab === 'design' ? ' sl-design-resource-grid' : ''}${state.activeTab === 'design' && state.designSubtab === 'font' ? ' sl-design-font-grid' : ''}`;
+      if (state.activeTab === 'video') {
+        const help = document.createElement('p');
+        help.className = 'sl-vhelp';
+        help.textContent = '위에 있는 것부터 추천 순서입니다. 「원본 파일」이 가장 빠르고, 「DASH/HLS를 MP4로 합치기」는 새 탭에서 조각을 받아 하나로 합칩니다. 「녹화」는 다른 방법이 없을 때 재생하면서 저장합니다.';
+        grid.append(help);
+      }
+      list.forEach(item => grid.append(makeTile(item)));
+      main.append(grid);
+      updateBulk();
+    };
+
+    const renderCssTokens = () => {
+      main.textContent = '';
+      const data = state.design || analyzeDesignSystem();
+      state.design = data;
+      const card = document.createElement('section');
+      card.className = 'sl-token-section sl-css-export';
+      card.innerHTML = `<div class="sl-kicker">CSS TOKENS</div><strong>페이지에서 추출한 CSS 변수</strong><p>반복되는 색상·서체·모서리·간격을 재사용 가능한 변수로 정리했습니다.</p>`;
+      const pre = document.createElement('pre'); pre.className = 'sl-code-block'; pre.textContent = data.css;
+      const actions = document.createElement('div'); actions.className = 'sl-design-actions';
+      actions.append(actionButton('primary', 'CSS 복사', () => copy(data.css), 'copy'));
+      actions.append(actionButton('normal', 'JSON 저장', () => downloadBlob(new Blob([data.json], { type: 'application/json' }), `${location.hostname.replace(/^www\\./, '')}-design-tokens.json`), 'save'));
+      card.append(pre, actions); main.append(card);
+    };
+
+    const renderDesign = () => {
+      if (state.designSubtab === 'font' || state.designSubtab === 'svg') { renderGrid(); return; }
+      if (state.designSubtab === 'css') { renderCssTokens(); return; }
+      main.textContent = '';
+      const data = state.design || analyzeDesignSystem();
+      state.design = data;
+      const head = document.createElement('section');
+      head.className = 'sl-design-head';
+      head.innerHTML = `<div><div class="sl-kicker">DESIGN AUDIT · ${esc(String(data.inspected || 0))}개 요소</div><strong>페이지 디자인 시스템</strong><p>렌더링된 CSS에서 반복되는 토큰과 일관성 신호를 추출했습니다.</p></div><div class="sl-design-score"><b>${esc(String(data.score || 0))}</b><span>/100</span><small>일관성</small></div>`;
+      main.append(head);
+      const actions = document.createElement('div');
+      actions.className = 'sl-design-actions';
+      actions.append(actionButton('primary', 'CSS 토큰 복사', () => copy(data.css), 'code'));
+      actions.append(actionButton('normal', 'JSON 저장', () => downloadBlob(new Blob([data.json], { type: 'application/json' }), `${location.hostname.replace(/^www\\./, '')}-design-tokens.json`), 'save'));
+      actions.append(actionButton('normal', 'Tailwind 복사', () => copy(data.tailwind), 'code'));
+      actions.append(actionButton('normal', '화면 색상 픽커', async button => {
+        if (!('EyeDropper' in window)) { toast('이 브라우저는 화면 색상 픽커를 지원하지 않습니다.', 'error'); return; }
+        try { const result = await new EyeDropper().open(); copy(result.sRGBHex, button); } catch { /* 사용자가 취소 */ }
+      }, 'palette'));
+      main.append(actions);
+      const summary = document.createElement('div');
+      summary.className = 'sl-design-summary';
+      [['colors', '색상'], ['gradients', '그라디언트'], ['typography', '서체'], ['spacing', '간격'], ['radii', '모서리'], ['shadows', '그림자']].forEach(([key, label]) => {
+        const item = document.createElement('div'); item.className = 'sl-design-stat'; item.innerHTML = `<span>${iconSvg(key === 'colors' ? 'palette' : key === 'typography' ? 'text' : key === 'shadows' ? 'shadow' : 'audit')}</span><b>${esc(String(data[key]?.length || 0))}</b><small>${esc(label)}</small>`; summary.append(item);
+      });
+      main.append(summary);
+      const context = document.createElement('div');
+      context.className = 'sl-design-context';
+      context.innerHTML = `<span>${iconSvg('terminal')}<b>감지 스택</b> ${esc((data.frameworks || []).join(' · ') || '프레임워크 신호 없음')}</span><span>${iconSvg('audit')}<b>대비</b> ${esc(`${data.contrast?.failures || 0}건 이슈 / ${data.contrast?.checks || 0}건 검사`)}</span>`;
+      main.append(context);
+      const health = document.createElement('section'); health.className = 'sl-health-section';
+      const hh = document.createElement('h3'); hh.innerHTML = `${iconSvg('audit')}<span>디자인 건강도</span><small>${data.health?.length || 0}개 기준</small>`; health.append(hh);
+      (data.health || []).forEach(row => { const item = document.createElement('div'); item.className = 'sl-health-row'; item.innerHTML = `<span>${esc(row.label)}</span><i><b style="width:${Math.max(0, Math.min(100, row.score))}%"></b></i><strong>${esc(String(row.score))}</strong>`; health.append(item); });
+      main.append(health);
+      const section = (title, icon, rows, renderRow) => {
+        const box = document.createElement('section'); box.className = 'sl-token-section';
+        const h = document.createElement('h3'); h.innerHTML = `${iconSvg(icon)}<span>${esc(title)}</span><small>${rows?.length || 0}</small>`; box.append(h);
+        if (!rows?.length) { const empty = document.createElement('p'); empty.className = 'sl-token-empty'; empty.textContent = '감지된 토큰이 없습니다.'; box.append(empty); }
+        else rows.slice(0, 12).forEach(row => box.append(renderRow(row)));
+        main.append(box);
+      };
+      section('주요 색상', 'palette', data.colors, row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<i class="sl-color-dot"></i><code>${esc(row.value)}</code><span>${esc(String(row.count))}회</span>`; el.querySelector('.sl-color-dot').style.background = row.value; return el; });
+      section('타이포그래피', 'text', data.typography, row => { const el = document.createElement('div'); el.className = 'sl-token-row sl-type-row'; el.innerHTML = `<strong>가나다 ABCD</strong><div><code>${esc(row.family)}</code><small>${esc(row.size)} · ${esc(row.weight)} · 행간 ${esc(row.lineHeight)}</small></div><span>${esc(String(row.count))}회</span>`; el.querySelector('strong').style.fontFamily = row.family; el.querySelector('strong').style.fontSize = row.size; return el; });
+      section('그라디언트', 'gradient', data.gradients, row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<i class="sl-gradient-swatch"></i><code>${esc(row.value)}</code><span>${esc(String(row.count))}회</span>`; el.querySelector('.sl-gradient-swatch').style.backgroundImage = row.value; return el; });
+      section('컴포넌트 스타일', 'audit', data.components, row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<code>radius ${esc(row.radius)} · ${esc(row.size)} · ${esc(row.weight)}</code><span>${esc(String(row.count))}개</span>`; return el; });
+      section('간격·모서리·그림자', 'audit', [...(data.spacing || []).slice(0, 4), ...(data.radii || []).slice(0, 4), ...(data.shadows || []).slice(0, 4)], row => { const el = document.createElement('div'); el.className = 'sl-token-row'; el.innerHTML = `<code>${esc(row.value)}</code><span>${esc(String(row.count))}회</span>`; return el; });
+      const issues = document.createElement('section'); issues.className = 'sl-token-section sl-audit-issues'; const ih = document.createElement('h3'); ih.innerHTML = `${iconSvg('audit')}<span>감사 메모</span><small>${data.issues?.length || 0}</small>`; issues.append(ih); (data.issues || []).forEach(row => { const el = document.createElement('div'); el.className = `sl-audit-item is-${row.level}`; el.innerHTML = `<b>${esc(row.title)}</b><p>${esc(row.detail)}</p>`; issues.append(el); }); main.append(issues);
+    };
+
+    state.updateVideoTab = () => {
+      updateCounts();
+      if (state.activeTab === 'video') renderGrid();
+    };
+
+    const drawTools = () => {
+      tools.textContent = '';
+      if (state.activeTab === 'selected' || (state.activeTab === 'design' && !['font', 'svg'].includes(state.designSubtab))) { tools.hidden = true; return; }
+      tools.hidden = false;
+      const row = document.createElement('div');
+      row.className = 'sl-filter-row';
+      const search = document.createElement('input');
+      search.type = 'search';
+      search.className = 'sl-search';
+      search.placeholder = '검색: 파일명·주소 ( / )';
+      search.value = state.query;
+      search.oninput = () => { state.query = search.value; renderGrid(); };
+      row.append(search);
+      if (state.activeTab === 'image') {
+        const size = document.createElement('select');
+        size.className = 'sl-select';
+        size.title = '작은 썸네일·아이콘 숨기기';
+        [[0, '모든 크기'], [200, '200px 이상'], [400, '400px 이상'], [800, '800px 이상']].forEach(([v, label]) => {
+          const o = document.createElement('option');
+          o.value = String(v);
+          o.textContent = label;
+          size.append(o);
+        });
+        size.value = String(state.minPx || 0);
+        size.onchange = () => { state.minPx = Number(size.value) || 0; savePrefs({ minPx: state.minPx }); renderGrid(); };
+        row.append(size);
+      }
+      if (!(state.activeTab === 'design' && state.designSubtab === 'svg')) {
+        const sort = document.createElement('select');
+        sort.className = 'sl-select';
+        sort.title = '정렬';
+        [['big', '큰 것부터'], ['page', '페이지 순서']].forEach(([v, label]) => {
+          const o = document.createElement('option');
+          o.value = v;
+          o.textContent = label;
+          sort.append(o);
+        });
+        sort.value = state.sort;
+        sort.onchange = () => { state.sort = sort.value; savePrefs({ sort: state.sort }); renderGrid(); };
+        row.append(sort);
+      }
+      tools.append(row);
+
+      const pick = document.createElement('div');
+      pick.className = 'sl-pick-row';
+      pick.innerHTML = '<label><input type="checkbox" class="sl-select-all"> 전체 선택</label><span class="sl-select-note"></span>';
+      pick.querySelector('.sl-select-all').onchange = ev => {
+        const list = visibleList();
+        if (ev.target.checked) list.forEach(item => state.selectedKeys.add(itemKey(item)));
+        else list.forEach(item => state.selectedKeys.delete(itemKey(item)));
+        renderGrid();
+      };
+      tools.append(pick);
+
+      const bar = document.createElement('div');
+      bar.className = 'sl-bulk';
+      const mk = (cls, brandBtn) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = `sl-btn ${cls}${brandBtn ? ' sl-btn-brand' : ''}`;
+        const icon = cls.includes('copy') ? 'copy' : cls.includes('zip') ? 'zip' : cls.includes('meta') ? 'list' : 'save';
+        b.innerHTML = `${iconSvg(icon)}<span class="sl-btn-label"></span>`;
+        bar.append(b);
+        return b;
+      };
+      const saveBtn = mk('sl-act-save', true);
+      saveBtn.onclick = async () => {
+        const targets = bulkTargets(visibleList()).slice(0, SAVE_MAX);
+        if (!targets.length) return;
+        saveBtn.disabled = true;
+        saveBtn.dataset.busy = '1';
+        let ok = 0, fail = 0;
+        for (let i = 0; i < targets.length; i++) {
+          setButtonText(saveBtn, `저장 ${i + 1}/${targets.length}`);
+          await new Promise(resolve => saveItem(targets[i], good => { if (good) ok += 1; else fail += 1; resolve(); }));
+          await new Promise(r => setTimeout(r, 250));
+        }
+        toast(fail ? `${ok}개 저장 시작 · ${fail}개 실패` : `${ok}개 저장을 시작했습니다`, fail && !ok ? 'error' : '');
+        delete saveBtn.dataset.busy;
+        saveBtn.disabled = false;
+        updateBulk();
+      };
+      const zipBtn = mk('sl-act-zip', false);
+      if (state.activeTab === 'video') zipBtn.hidden = true;
+      zipBtn.title = `한 파일로 묶어 저장 (최대 ${ZIP_MAX}개)`;
+      zipBtn.onclick = () => {
+        const targets = bulkTargets(visibleList());
+        if (targets.length > ZIP_MAX) toast(`ZIP은 최대 ${ZIP_MAX}개까지 묶습니다. 앞쪽 ${ZIP_MAX}개만 담습니다.`);
+        zipItems(targets, zipBtn);
+      };
+      const copyBtn = mk('sl-act-copy', false);
+      copyBtn.onclick = () => {
+        const urls = bulkTargets(visibleList()).map(item => liveUrl(item)).filter(u => u && !/^data:/i.test(u));
+        if (!urls.length) { toast('복사할 URL이 없습니다 (SVG 코드는 「코드 복사」를 쓰세요)', 'error'); return; }
+        copy(urls.join('\n'));
+      };
+      const metaBtn = mk('sl-act-meta', false);
+      metaBtn.title = '선택 항목의 파일명·크기·포맷·원본 주소를 CSV로 저장';
+      metaBtn.onclick = () => exportMetadata(bulkTargets(visibleList()), metaBtn);
+      if (state.activeTab === 'design' && state.designSubtab === 'svg') {
+        const codeBtn = mk('sl-act-code', false);
+        codeBtn.innerHTML = `${iconSvg('code')}<span class="sl-btn-label">코드 복사</span>`;
+        codeBtn.onclick = () => {
+          const codes = bulkTargets(visibleList()).map(item => svgSource(item)).filter(Boolean);
+          if (!codes.length) { toast('복사할 SVG 코드가 없습니다', 'error'); return; }
+          copy(codes.join('\n\n'));
+        };
+      }
+      tools.append(bar);
+    };
+
+    const drawSelected = () => {
+      main.textContent = '';
+      const item = (state.picked || state.candidates[0]);
+      if (!item) {
+        if (state.analysis) main.append(renderStyleAnalysis(state.analysis));
+        if (state.analysis) return;
+        const box = document.createElement('div');
+        box.className = 'sl-empty';
+        box.textContent = emptyText();
+        main.append(box);
+        return;
+      }
+      const preview = mediaNode(item, 'sl-preview');
+      if (preview) main.append(preview);
+      const card = document.createElement('article');
+      card.className = 'sl-primary';
+      card.innerHTML = `<div class="sl-kicker">대표 후보 · ${esc(item.source || '')}</div><strong>${esc(labelOf(item))}</strong>
+        <div class="sl-file-meta sl-meta">${esc(item.state)} · ${esc(item.mime || item.type)}</div>
+        <div class="sl-primary-actions"></div>`;
+      if (isTallItem(item)) {
+        const hint = document.createElement('p');
+        hint.className = 'sl-hint';
+        hint.textContent = '긴 상세 이미지입니다. 분할 편집으로 구간을 자를 수 있습니다.';
+        card.querySelector('.sl-file-meta').after(hint);
+      }
+      const actions = card.querySelector('.sl-primary-actions');
+      fillItemActions(actions, item, {
+        onUrl: ev => {
+          const existing = card.querySelector('.sl-url-value');
+          if (existing) {
+            existing.remove();
+            setButtonText(ev.currentTarget, 'URL 보기');
+            return;
+          }
+          const code = document.createElement('code');
+          code.className = 'sl-url-value';
+          code.textContent = liveUrl(item);
+          card.append(code);
+          setButtonText(ev.currentTarget, 'URL 숨기기');
+        },
+        onCodeView: ev => {
+          const existing = card.querySelector('.sl-svg-code');
+          if (existing) { existing.remove(); setButtonText(ev.currentTarget, '코드 보기'); return; }
+          const pre = document.createElement('pre');
+          pre.className = 'sl-url-value sl-svg-code';
+          pre.textContent = svgSource(item) || '코드를 불러오는 중…';
+          card.append(pre);
+          setButtonText(ev.currentTarget, '코드 숨기기');
+          if (!svgSource(item) && /\.svg(?:$|[?#])/i.test(item.url || '')) {
+            fetchBytes(item.url).then(blob => blob.text()).then(text => {
+              item.code = sanitizeSvg(text);
+              pre.textContent = item.code;
+            }).catch(() => { pre.textContent = item.url; });
+          }
+        }
+      });
+      hydrateMeta(item, card);
+      main.append(card);
+      if (state.analysis) main.append(renderStyleAnalysis(state.analysis));
+    };
+
+    const draw = () => {
+      try {
+        panel.querySelectorAll('.sl-tabs button').forEach(btn => {
+          const on = btn.dataset.tab === state.activeTab;
+          btn.classList.toggle('active', on);
+          btn.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        const designNav = panel.querySelector('.sl-design-tabs');
+        if (designNav) {
+          designNav.hidden = state.activeTab !== 'design';
+          designNav.querySelectorAll('button').forEach(btn => {
+            const on = btn.dataset.designTab === state.designSubtab;
+            btn.classList.toggle('active', on);
+            btn.setAttribute('aria-selected', on ? 'true' : 'false');
+          });
+        }
+        updateCounts();
+        drawTools();
+      if (state.activeTab === 'selected') drawSelected();
+        else if (state.activeTab === 'design') renderDesign();
+        else renderGrid();
+      } catch (error) {
+        const box = document.createElement('div');
+        box.className = 'sl-empty';
+        box.textContent = `화면을 그리지 못했습니다. ${error.message || error}`;
+        main.append(box);
+      }
+    };
+
+    state.switchTab = tab => {
+      if (state.activeTab !== tab) state.selectedKeys.clear();
+      state.activeTab = tab;
+      draw();
+    };
+    state.switchDesignTab = tab => {
+      if (!['overview', 'font', 'css', 'svg'].includes(tab)) return;
+      state.activeTab = 'design';
+      state.designSubtab = tab;
+      state.selectedKeys.clear();
+      draw();
+    };
+    panel.querySelectorAll('.sl-tabs button').forEach(btn => {
+      btn.onclick = () => state.switchTab(btn.dataset.tab);
+    });
+    panel.querySelectorAll('.sl-design-tabs button').forEach(btn => {
+      btn.onclick = () => state.switchDesignTab(btn.dataset.designTab);
+    });
+    state.focusSearch = () => {
+      const input = tools.querySelector('.sl-search');
+      if (input) { input.focus(); input.select(); }
+    };
+    // Called when new media shows up on the page: append new tiles instead of
+    // rebuilding everything, so scroll position and selections stay put.
+    state.redraw = () => {
+      updateCounts();
+      if (state.activeTab === 'selected') return;
+      if (state.activeTab === 'design' && !['font', 'svg'].includes(state.designSubtab)) return;
+      if (!grid) { renderGrid(); return; }
+      visibleList().forEach(item => {
+        if (!rendered.has(itemKey(item))) grid.append(makeTile(item));
+      });
+      updateBulk();
+    };
+    draw();
+    startPageWatch();
+  }
+
+  function openPagePanel(preferTab) {
+    try { document.documentElement.dispatchEvent(new CustomEvent('sl-extract-now')); } catch { /* ignore */ }
+    state.selected = null;
+    state.selectedMedia = null;
+    state.analysis = null;
+    state.postUrl = postUrl(document.body);
+    state.candidates = dedupe([...collectPageMedia(), ...(state.platformMedia || [])])
+      .filter(item => item && !(item.type === 'video' && SL.isImageUrl(item.url)));
+    const images = state.candidates.filter(i => i.type === 'image');
+    state.picked = images.slice().sort((a, b) => itemPixel(b) - itemPixel(a))[0] || state.candidates[0] || null;
+    const count = type => state.candidates.filter(i => i.type === type).length;
+    state.design = analyzeDesignSystem();
+    state.designSubtab = ['font', 'svg', 'css', 'overview'].includes(preferTab) ? (preferTab === 'font' || preferTab === 'svg' ? preferTab : preferTab) : 'overview';
+    const initialTab = preferTab === 'font' || preferTab === 'svg' || preferTab === 'css' || preferTab === 'overview' ? 'design' : preferTab;
+    state.activeTab = initialTab || (count('image') ? 'image' : count('video') ? 'video' : 'design');
+    state.selectedKeys.clear();
+    render();
+    requestFrameMedia();
+  }
+
+  function collectArticle(target) {
+    const root = target?.closest?.('article') || target;
+    if (!root?.querySelectorAll) return [];
+    const out = [];
+    root.querySelectorAll('img, video').forEach(node => {
+      const r = node.getBoundingClientRect();
+      if (Math.min(r.width, node.naturalWidth || node.videoWidth || r.width) < 80) return;
+      out.push(...(collectTarget(node).candidates || []));
+    });
+    return out.filter(item => item && !SL.isUiJunk(item.url) && item.type !== 'svg');
+  }
+
+  async function inspect(target, seed = []) {
+    if (!target) return;
+    document.documentElement.dispatchEvent(new CustomEvent('sl-extract-now', { bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    const analysis = analyzeTarget(target);
+    state.design = analyzeDesignSystem();
+    const collected = collectTarget(target);
+    state.selected = target;
+    state.analysis = analysis;
+    const tag = (collected.media?.tagName || target?.tagName || '').toUpperCase();
+    const clickedVideo = tag === 'VIDEO';
+    const clickedSvg = tag === 'SVG';
+    const fontCandidates = !clickedVideo && !clickedSvg && analysis?.text ? collectPageFonts() : [];
+    state.selectedMedia = clickedVideo ? collected.media : null;
+    state.postUrl = postUrl(target);
+    const textOnly = !!analysis?.text && !analysis.background && !clickedVideo && !clickedSvg;
+    const extras = [];
+    if (!textOnly) {
+      if (clickedVideo || ['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'naver', 'kakao', 'daum', 'video'].includes(siteKind())) {
+        extras.push(...collectRecentVideos(collected.media));
+      }
+      extras.push(...(state.platformMedia || []));
+      if (isCommerce()) extras.push(...collectCommerce());
+      extras.push(...collectSiteExtras());
+      extras.push(...collectInlineSvg(target));
+      if (siteKind() === 'youtube') extras.push(...collectYouTube(target));
+      if (!clickedSvg) extras.push(...collectArticle(target));
+    }
+    const seenVideo = new Set();
+    let list = rank(dedupe([...seed, ...collected.candidates, ...extras]), collected.media)
+      .filter(item => item && !(SL.isUiJunk(item.url) && item.type !== 'svg' && item.relation !== 'target'));
+    if (textOnly) list = [];
+    else if (clickedSvg) list = list.filter(item => item.type === 'svg');
+    else if (clickedVideo) {
+      const videos = list.filter(item => {
+        if (item.type !== 'video' || !(item.temporary || SL.isVideoUrl(item.url))) return false;
+        const key = pathKey(item.url);
+        if (seenVideo.has(key)) return false;
+        seenVideo.add(key);
+        return true;
+      });
+      const https = videos.filter(item => /^https?:/i.test(item.url) && !item.temporary)
+        .sort((a, b) => (b.size || 0) - (a.size || 0) || b.url.length - a.url.length);
+      const blobs = videos.filter(item => item.temporary).slice(0, 1);
+      const poster = list.filter(item => item.type === 'image' && SL.isImageUrl(item.url)).slice(0, 2);
+      const svgs = list.filter(item => item.type === 'svg');
+      list = [...https.slice(0, 2), ...blobs, ...poster, ...svgs];
+    } else {
+      list = list.filter(item => (item.type === 'image' && (SL.isImageUrl(item.url) || item.relation === 'target' || item.element?.tagName === 'IMG')) || item.type === 'svg');
+    }
+    // The Selected tab is intentionally single-item: prefer the candidate
+    // produced from the exact Alt+clicked node, then fall back to the ranked
+    // result only when the page did not expose a direct URL.
+    const directPick = list.find(item => item.element && (item.element === collected.media || item.relation === 'target'));
+    const fontPick = fontCandidates.find(item => {
+      const family = String(item.family || '').split(',')[0].replace(/["']/g, '').trim().toLowerCase();
+      return family && String(analysis?.text?.family || '').toLowerCase().includes(family);
+    });
+    state.picked = fontPick || directPick || list.find(item => !isChromeImage(item.element, item.url)) || list[0] || null;
+
+    state.candidates = textOnly ? [] : dedupe([...list, ...collectPageMedia(), ...(state.platformMedia || [])]);
+    rememberCapture(state.candidates);
+    state.activeTab = clickedVideo ? 'video' : 'selected';
+    if (window !== window.top) {
+      try {
+        window.top.postMessage({
+          sourceLens: true,
+          type: 'open',
+          data: {
+            candidates: state.candidates.map(({ element, ...item }) => item),
+            picked: state.picked ? (({ element, ...item }) => item)(state.picked) : null,
+            analysis: plainAnalysis(state.analysis),
+            design: state.design,
+            postUrl: state.postUrl,
+            activeTab: state.activeTab
+          }
+        }, '*');
+      } catch {
+        render();
+      }
+      return;
+    }
+    render();
+    requestFrameMedia();
+    if (clickedVideo && state.autoVideo && VF && !state.recorder) {
+      // Alt+click on a video: save right away when a real file/stream exists; recording always needs an explicit click.
+      const best = VF.best(refreshVideoItems(), collected.media);
+      if (best && (best.kind === 'direct' || best.kind === 'dash' || best.kind === 'hls')) saveVideo(best);
+    }
+  }
+
+  const fromOurUi = ev => ev.target === state.host || !!ev.target?.closest?.('#sl-host');
+
+  let altHandledAt = 0;
+  window.addEventListener('mousedown', ev => {
+    if (!alive()) return; // stale copy after an update: let the live copy handle it
+    if (!state.altClick) return;
+    if (ev.altKey && ev.button === 0 && !fromOurUi(ev)) {
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+    }
+  }, true);
+
+  function clickTarget(ev, deepNode) {
+    // Media inside open shadow DOM is invisible to elementsFromPoint; use the real event path.
+    const deep = deepNode || ev.composedPath?.()[0];
+    if (deep && deep.nodeType === 1 && deep.getRootNode?.() !== document) {
+      const media = deep.closest?.('img,video,svg,picture');
+      if (media) return media;
+    }
+    return mediaAtPoint(ev.clientX, ev.clientY);
+  }
+
+  window.addEventListener('click', ev => {
+    if (!alive()) return;
+    if (!state.altClick) return;
+    if (!ev.altKey || ev.button !== 0 || fromOurUi(ev)) return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    altHandledAt = Date.now();
+    inspect(clickTarget(ev));
+  }, true);
+
+  // Safety net: an old copy still sitting in a tab that was open during an update can swallow the click
+  // before this copy sees it. If our click handler did not run, open the panel from here instead.
+  window.addEventListener('pointerup', ev => {
+    if (!alive() || !state.altClick || !ev.altKey || ev.button !== 0 || fromOurUi(ev)) return;
+    const at = Date.now();
+    const point = { clientX: ev.clientX, clientY: ev.clientY };
+    const deep = ev.composedPath?.()[0];
+    setTimeout(() => {
+      if (altHandledAt >= at) return;
+      removeStaleHosts();
+      inspect(clickTarget(point, deep));
+    }, 350);
+  }, true);
+
+  window.addEventListener('mousemove', ev => {
+    state.lastPoint = { x: ev.clientX, y: ev.clientY, t: Date.now() };
+  }, { capture: true, passive: true });
+
+  document.addEventListener('contextmenu', ev => {
+    const deep = ev.composedPath?.()[0];
+    const base = deep && deep.nodeType === 1 ? deep : ev.target;
+    state.contextTarget = base?.closest?.('img,video,svg,a') || base;
+  }, true);
+
+  function hotkeyInspect() {
+    if (state.panel) { closePanel(); return; }
+    const p = state.lastPoint;
+    if (p && Date.now() - p.t < 120000) {
+      const target = mediaAtPoint(p.x, p.y);
+      const isMedia = target?.matches?.('img,video,svg,picture') || target?.closest?.('img,video,svg,picture');
+      const visual = analyzeTarget(target);
+      if (target && (isMedia || visual || collectTarget(target).candidates.length)) { inspect(target); return; }
+    }
+    openPagePanel();
+  }
+
+  window.addEventListener('message', ev => {
+    if (!ev.data?.sourceLens) return;
+    if (ev.data.type === 'requestMedia' && window !== window.top) {
+      try {
+        window.top.postMessage({
+          sourceLens: true,
+          type: 'pageMedia',
+          data: collectPageMedia().map(({ element, ...item }) => item)
+        }, '*');
+      } catch { /* ignore */ }
+      return;
+    }
+    if (window !== window.top) return;
+    if (ev.data.type === 'pageMedia' && Array.isArray(ev.data.data)) {
+      if (!state.panel) return;
+      const have = new Set(state.candidates.map(itemKey));
+      ev.data.data.forEach(item => {
+        if (!item?.url || typeof item.url !== 'string') return;
+        const key = itemKey(item);
+        if (have.has(key)) return;
+        have.add(key);
+        state.candidates.push(item);
+      });
+      state.redraw?.();
+      return;
+    }
+    if (ev.data.type !== 'open' || ev.source === window) return;
+    state.candidates = ev.data.data?.candidates || [];
+    state.picked = ev.data.data?.picked || state.candidates[0] || null;
+    state.analysis = ev.data.data?.analysis || null;
+    state.design = ev.data.data?.design || null;
+    state.postUrl = ev.data.data?.postUrl || '';
+    state.activeTab = ev.data.data?.activeTab || 'selected';
+    render();
+  });
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === 'listImages' || message?.type === 'listPageMedia') {
+      sendResponse(listPageMedia());
+      return true;
+    }
+    if (message?.type === 'ping') {
+      sendResponse({ ok: true, version: VERSION });
+      return true;
+    }
+    if (message?.type === 'openPanel') {
+      if (window !== window.top) return;
+      openPagePanel(message.tab);
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (message?.type === 'hotkeyInspect') {
+      if (window !== window.top) return;
+      hotkeyInspect();
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (message?.type === 'oneClickVideo') {
+      if (window !== window.top) return;
+      oneClickSaveVideo(null, null).then(sendResponse);
+      return true;
+    }
+    if (message?.type === 'recordVideo') {
+      if (state.recorder) { stopRecording(true); sendResponse({ ok: true, mode: 'stop' }); return true; }
+      const video = VF?.videoByVid(message.vid) || pickCaptureVideo(null);
+      startRecording(video, null).then(sendResponse);
+      return true;
+    }
+    if (message?.type === 'recordingState') {
+      sendResponse({ recording: !!state.recorder, last: state.lastRecording || null });
+      return true;
+    }
+    if (message?.type !== 'contextInspect') return;
+    const target = state.contextTarget || mediaAtPoint(innerWidth / 2, innerHeight / 2);
+    const seed = message.info?.srcUrl
+      ? [candidate(message.info.srcUrl, '우클릭 URL', message.info.mediaType === 'video' ? 'video' : 'image', { confidence: '최상', allowJunk: true })]
+      : [];
+    inspect(target, seed);
+  });
+
+  window.addEventListener('keydown', ev => {
+    const root = state.shadow;
+    const slice = root?.querySelector('.sl-slice-editor');
+    const box = root?.querySelector('.sl-lightbox');
+    if (!state.panel && !slice && !box) return;
+    const target = ev.composedPath?.()[0] || ev.target;
+    const inOurUi = target?.getRootNode?.() === root;
+    if (SL.isTypingTarget(target)) {
+      if (inOurUi && ev.key === 'Escape') {
+        if (target.value) { target.value = ''; target.dispatchEvent(new Event('input')); }
+        else target.blur();
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+      return;
+    }
+    if (ev.key === 'Escape') {
+      if (slice) slice.querySelector('.sl-slice-close')?.click();
+      else if (box) { box.remove(); state.lightboxItem = null; }
+      else closePanel();
+      ev.stopPropagation();
+      return;
+    }
+    if (ev.ctrlKey || ev.metaKey || ev.altKey || slice) return;
+    if (box && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) {
+      box.querySelector(ev.key === 'ArrowLeft' ? '.sl-lightbox-prev' : '.sl-lightbox-next')?.click();
+      ev.preventDefault();
+      ev.stopPropagation();
+      return;
+    }
+    if (!state.panel) return;
+    const tabs = { 1: 'selected', 2: 'image', 3: 'video', 4: 'design' };
+    if (!box && tabs[ev.key]) { state.switchTab?.(tabs[ev.key]); ev.stopPropagation(); return; }
+    const designTabs = { 5: 'overview', 6: 'font', 7: 'css', 8: 'svg' };
+    if (!box && state.activeTab === 'design' && designTabs[ev.key]) { state.switchDesignTab?.(designTabs[ev.key]); ev.stopPropagation(); return; }
+    if (!box && ev.key === '/') { ev.preventDefault(); ev.stopPropagation(); state.focusSearch?.(); return; }
+    const current = state.lightboxItem || state.picked;
+    if ((ev.key === 's' || ev.key === 'S') && current) { saveItem(current); ev.stopPropagation(); }
+    if ((ev.key === 'c' || ev.key === 'C') && current) {
+      if (current.type === 'svg') copySvg(current); else copy(liveUrl(current));
+      ev.stopPropagation();
+    }
+  }, true);
+})();
