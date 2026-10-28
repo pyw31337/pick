@@ -3,9 +3,12 @@
    2) Reads platform JSON (Instagram, Facebook, generic JSON-LD) and groups video URLs per video.
    3) Notices DRM (Encrypted Media Extensions) so the extension can say "protected" instead of failing silently. */
 (() => {
-  // Versioned guard: a page that still has the 1.0 hooks (opened before the update) also gets the 1.1 video hooks.
-  if (window.__sourceLensMain === '1.1') return;
-  window.__sourceLensMain = '1.1';
+  // Versioned guard. Network interception is deliberately lazy: installing the
+  // extension must not alter page fetch/XHR behaviour until the user asks for
+  // an inspection. This is especially important on ad-heavy pages whose own
+  // CSP errors would otherwise point at our wrapper in the stack trace.
+  if (window.__sourceLensMain === '1.2') return;
+  window.__sourceLensMain = '1.2';
   const root = document.documentElement;
   const fire = (name, detail) => { try { root.dispatchEvent(new CustomEvent(name, { detail })); } catch { /* ignore */ } };
 
@@ -198,6 +201,54 @@
   }
 
   // ------------------------------------------------------------------ hooks
+  let networkHooksInstalled = false;
+  const scanLoadedResources = () => {
+    try {
+      performance.getEntriesByType('resource').forEach(entry => {
+        const url = entry?.name || '';
+        if (url) emit(url, 'performance');
+      });
+    } catch { /* ignore */ }
+  };
+  const installNetworkHooks = () => {
+    if (networkHooksInstalled) return;
+    networkHooksInstalled = true;
+    scanLoadedResources();
+    try {
+      const origFetch = window.fetch;
+      if (typeof origFetch === 'function') {
+        window.fetch = function (...args) {
+          let url = '';
+          try { url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || String(args[0] || '')); emit(url, 'fetch'); } catch { /* ignore */ }
+          const pending = origFetch.apply(this, args);
+          if (pending && typeof pending.then === 'function') {
+            pending.then(res => {
+              try {
+                const ct = res.headers?.get?.('content-type') || '';
+                watchText(res.url || url, ct, () => res.clone().text());
+              } catch { /* ignore */ }
+            }).catch(() => {});
+          }
+          return pending;
+        };
+      }
+    } catch { /* ignore */ }
+    try {
+      const open = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+        const u = String(url || '');
+        try { emit(u, 'xhr'); } catch { /* ignore */ }
+        this.addEventListener('load', () => {
+          try {
+            const ct = this.getResponseHeader?.('content-type') || '';
+            const rt = this.responseType;
+            watchText(this.responseURL || u, ct, () => Promise.resolve(rt === '' || rt === 'text' ? this.responseText : (rt === 'json' ? JSON.stringify(this.response) : '')));
+          } catch { /* ignore */ }
+        });
+        return open.call(this, method, url, ...rest);
+      };
+    } catch { /* ignore */ }
+  };
   const watchText = (url, ct, getText) => {
     try {
       if (/mpegurl|m3u8/i.test(ct) || /\.m3u8(?:$|[?#])/i.test(url)) emit(url, 'manifest', { manifest: 'hls' });
@@ -205,45 +256,11 @@
       else if (/json|javascript|text\/html|text\/plain/i.test(ct) && /graphql|api|ajax|query|bulk-route|web_info|\/info\b/i.test(url)) getText().then(sniffJson).catch(() => {});
     } catch { /* ignore */ }
   };
-  try {
-    const origFetch = window.fetch;
-    window.fetch = function (...args) {
-      let url = '';
-      try { url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || String(args[0] || '')); emit(url, 'fetch'); } catch { /* ignore */ }
-      const pending = origFetch.apply(this, args);
-      if (pending && typeof pending.then === 'function') {
-        pending.then(res => {
-          try {
-            const ct = res.headers?.get?.('content-type') || '';
-            watchText(res.url || url, ct, () => res.clone().text());
-          } catch { /* ignore */ }
-        }).catch(() => {});
-      }
-      return pending;
-    };
-  } catch { /* ignore */ }
-
-  try {
-    const open = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-      const u = String(url || '');
-      try { emit(u, 'xhr'); } catch { /* ignore */ }
-      this.addEventListener('load', () => {
-        try {
-          const ct = this.getResponseHeader?.('content-type') || '';
-          const rt = this.responseType;
-          watchText(this.responseURL || u, ct, () => Promise.resolve(rt === '' || rt === 'text' ? this.responseText : (rt === 'json' ? JSON.stringify(this.response) : '')));
-        } catch { /* ignore */ }
-      });
-      return open.call(this, method, url, ...rest);
-    };
-  } catch { /* ignore */ }
-
   // ------------------------------------------------------------------ triggers
   const kick = () => { try { scanScripts(); } catch { /* ignore */ } };
   document.addEventListener('DOMContentLoaded', kick, { once: true });
   window.addEventListener('load', () => setTimeout(kick, 300), { once: true });
-  root.addEventListener('sl-extract-now', () => { kick(); flushGroups(); });
+  root.addEventListener('sl-extract-now', () => { installNetworkHooks(); kick(); flushGroups(); });
   // SPA navigation (Instagram/Facebook swap pages without reloading)
   let lastHref = location.href;
   setInterval(() => {
