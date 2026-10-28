@@ -419,7 +419,10 @@ async function copyText(text, button) {
 }
 
 function sendMessage(msg) {
-  return new Promise(resolve => api.runtime.sendMessage(msg, r => { void api.runtime.lastError; resolve(r || {}); }));
+  return new Promise(resolve => api.runtime.sendMessage(msg, r => {
+    const error = api.runtime.lastError?.message;
+    resolve(error ? { ok: false, error } : (r || { ok: true }));
+  }));
 }
 
 async function saveItems(items) {

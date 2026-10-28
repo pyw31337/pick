@@ -38,7 +38,8 @@ async function fetchMedia(url, referer = '') {
 const metaCache = new Map();
 
 async function resourceMeta(url, referer = '') {
-  if (metaCache.has(url)) return metaCache.get(url);
+  const cacheKey = `${url}\n${referer}`;
+  if (metaCache.has(cacheKey)) return metaCache.get(cacheKey);
   let size = null, mime = '';
   const read = response => {
     mime = mime || (response.headers.get('content-type') || '').split(';')[0];
@@ -61,7 +62,7 @@ async function resourceMeta(url, referer = '') {
     } catch { /* ignore */ }
   }
   const result = { size, mime };
-  metaCache.set(url, result);
+  metaCache.set(cacheKey, result);
   if (metaCache.size > 800) metaCache.delete(metaCache.keys().next().value);
   return result;
 }
@@ -79,7 +80,13 @@ async function targetName(filename) {
   const p = await prefs();
   const folder = String(p.folder || 'lets-pick').replace(/[\\:*?"<>|]+/g, '_').replace(/^\/+|\/+$/g, '').replace(/\.\.+/g, '_') || 'lets-pick';
   const name = String(filename || 'lets-pick/media');
-  return name.replace(/^(?:source-lens|lets-pick)\//, `${folder}/`);
+  const parts = name.split('/').map(part => String(part || '')
+    .replace(/[\\:*?"<>|\u0000-\u001f]+/g, '_')
+    .replace(/^\.+$/, '_')
+    .trim()
+    .slice(0, 180)).filter(Boolean);
+  if (/^(?:source-lens|lets-pick)$/i.test(parts[0] || '')) parts.shift();
+  return [folder, ...(parts.length ? parts : ['media'])].join('/');
 }
 
 function crcTable() {
@@ -245,7 +252,12 @@ function forgetTabMedia(tabId) {
   try { chrome.storage.session.remove(mediaKey(tabId)); } catch { /* ignore */ }
 }
 chrome.tabs.onUpdated.addListener((tabId, info) => {
-  if (info.status === 'loading' && info.url) forgetTabMedia(tabId);
+  if (info.status === 'loading') {
+    // A reload often has no `info.url`; clear both caches on every navigation
+    // so media from the previous document is never shown in the new tab.
+    requestsByTab.delete(tabId);
+    forgetTabMedia(tabId);
+  }
 });
 if (chrome.webRequest?.onHeadersReceived) {
   chrome.webRequest.onHeadersReceived.addListener(details => {

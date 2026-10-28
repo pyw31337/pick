@@ -12,8 +12,6 @@
   const root = document.documentElement;
   const fire = (name, detail) => { try { root.dispatchEvent(new CustomEvent(name, { detail })); } catch { /* ignore */ } };
 
-  try { performance.setResourceTimingBufferSize?.(3000); } catch { /* ignore */ }
-
   // ------------------------------------------------------------------ DRM detection
   const markDrm = (system, el) => {
     try {
@@ -22,24 +20,28 @@
     } catch { /* ignore */ }
     fire('sl-drm', { system: system || 'eme' });
   };
-  try {
-    const rmksa = navigator.requestMediaKeySystemAccess;
-    if (rmksa) {
-      navigator.requestMediaKeySystemAccess = function (system, configs) {
-        const p = rmksa.call(this, system, configs);
-        // Only a *granted* real key system (not ClearKey probes) counts.
-        p.then(() => { if (!/clearkey/i.test(system)) root.setAttribute('data-sl-drm-capable', system); }).catch(() => {});
-        return p;
-      };
-    }
-    const setMediaKeys = HTMLMediaElement.prototype.setMediaKeys;
-    if (setMediaKeys) {
-      HTMLMediaElement.prototype.setMediaKeys = function (keys) {
-        if (keys) markDrm(root.getAttribute('data-sl-drm-capable') || 'eme', this);
-        return setMediaKeys.call(this, keys);
-      };
-    }
-  } catch { /* ignore */ }
+  const installDrmHooks = () => {
+    if (window.__sourceLensDrmInstalled) return;
+    window.__sourceLensDrmInstalled = true;
+    try {
+      const rmksa = navigator.requestMediaKeySystemAccess;
+      if (rmksa) {
+        navigator.requestMediaKeySystemAccess = function (system, configs) {
+          const p = rmksa.call(this, system, configs);
+          // Only a *granted* real key system (not ClearKey probes) counts.
+          p.then(() => { if (!/clearkey/i.test(system)) root.setAttribute('data-sl-drm-capable', system); }).catch(() => {});
+          return p;
+        };
+      }
+      const setMediaKeys = HTMLMediaElement.prototype.setMediaKeys;
+      if (setMediaKeys) {
+        HTMLMediaElement.prototype.setMediaKeys = function (keys) {
+          if (keys) markDrm(root.getAttribute('data-sl-drm-capable') || 'eme', this);
+          return setMediaKeys.call(this, keys);
+        };
+      }
+    } catch { /* ignore */ }
+  };
 
   // ------------------------------------------------------------------ network URLs
   const videoLike = /(?:\.mp4|\.m4v|\.webm|\.mov|\.m3u8|\.mpd|\.ts|\.m4s)(?:$|[?#])|videoplayback|vod-progressive|playable_url|bytevod|mime_type=video/i;
@@ -202,6 +204,7 @@
 
   // ------------------------------------------------------------------ hooks
   let networkHooksInstalled = false;
+  let navigationTimer = 0;
   const scanLoadedResources = () => {
     try {
       performance.getEntriesByType('resource').forEach(entry => {
@@ -213,24 +216,31 @@
   const installNetworkHooks = () => {
     if (networkHooksInstalled) return;
     networkHooksInstalled = true;
+    installDrmHooks();
+    try { performance.setResourceTimingBufferSize?.(3000); } catch { /* ignore */ }
     scanLoadedResources();
     try {
       const origFetch = window.fetch;
       if (typeof origFetch === 'function') {
-        window.fetch = function (...args) {
-          let url = '';
-          try { url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || String(args[0] || '')); emit(url, 'fetch'); } catch { /* ignore */ }
-          const pending = origFetch.apply(this, args);
-          if (pending && typeof pending.then === 'function') {
-            pending.then(res => {
-              try {
-                const ct = res.headers?.get?.('content-type') || '';
-                watchText(res.url || url, ct, () => res.clone().text());
-              } catch { /* ignore */ }
-            }).catch(() => {});
+        const wrappedFetch = new Proxy(origFetch, {
+          apply(target, thisArg, args) {
+            let url = '';
+            try { url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || String(args[0] || '')); emit(url, 'fetch'); } catch { /* ignore */ }
+            const pending = Reflect.apply(target, thisArg, args);
+            try {
+              if (pending && typeof pending.then === 'function') {
+                pending.then(res => {
+                  try {
+                    const ct = res.headers?.get?.('content-type') || '';
+                    watchText(res.url || url, ct, () => res.clone().text());
+                  } catch { /* ignore */ }
+                }).catch(() => {});
+              }
+            } catch { /* never let inspection affect the page fetch */ }
+            return pending;
           }
-          return pending;
-        };
+        });
+        window.fetch = wrappedFetch;
       }
     } catch { /* ignore */ }
     try {
@@ -248,6 +258,17 @@
         return open.call(this, method, url, ...rest);
       };
     } catch { /* ignore */ }
+    let lastHref = location.href;
+    navigationTimer = setInterval(() => {
+      if (location.href !== lastHref) { lastHref = location.href; setTimeout(kick, 800); }
+    }, 1000);
+    window.addEventListener('pagehide', event => {
+      // A persisted page can return from the back/forward cache; keep the
+      // watcher alive in that case and only tear it down on a real unload.
+      if (event.persisted) return;
+      if (navigationTimer) clearInterval(navigationTimer);
+      navigationTimer = 0;
+    });
   };
   const watchText = (url, ct, getText) => {
     try {
@@ -261,9 +282,4 @@
   document.addEventListener('DOMContentLoaded', kick, { once: true });
   window.addEventListener('load', () => setTimeout(kick, 300), { once: true });
   root.addEventListener('sl-extract-now', () => { installNetworkHooks(); kick(); flushGroups(); });
-  // SPA navigation (Instagram/Facebook swap pages without reloading)
-  let lastHref = location.href;
-  setInterval(() => {
-    if (location.href !== lastHref) { lastHref = location.href; setTimeout(kick, 800); }
-  }, 1000);
 })();
