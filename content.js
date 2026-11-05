@@ -256,13 +256,25 @@
   const fileName = SL.fileName;
   const labelOf = item => item?.name || fileName(item?.url || '') || 'media';
 
+  function decodeDataSvg(url) {
+    if (!/^data:image\/svg/i.test(url || '')) return '';
+    try {
+      const comma = url.indexOf(',');
+      if (comma === -1) return '';
+      const meta = url.slice(0, comma);
+      const raw = url.slice(comma + 1);
+      if (/;base64/i.test(meta)) {
+        return atob(raw);
+      }
+      return decodeURIComponent(raw.replace(/\+/g, ' '));
+    } catch {
+      return '';
+    }
+  }
+
   function svgSource(item) {
     if (item?.code) return item.code;
-    if (/^data:image\/svg/i.test(item?.url || '')) {
-      try { return decodeURIComponent((item.url.split(',')[1] || '').replace(/\+/g, ' ')); }
-      catch { return item.url; }
-    }
-    return '';
+    return decodeDataSvg(item?.url) || '';
   }
 
   function copySvg(item, button) {
@@ -366,13 +378,18 @@
       }
     }
     const info = SL.classifyUrl(value, hint);
-    if (SL.PHOTO_EXT.test(value) || SL.isImageUrl(value)) info.type = 'image';
+    if (/^data:image\/svg/i.test(value) || /\.svg(?:$|[?#])/i.test(value)) info.type = 'svg';
+    else if (SL.PHOTO_EXT.test(value) || SL.isImageUrl(value)) info.type = 'image';
     if (info.type === 'video' && SL.isImageUrl(value)) info.type = 'image';
     if (info.type === 'video' && /i\.ytimg|maxresdefault|hqdefault|mqdefault/i.test(value)) info.type = 'image';
+    let code = extra.code;
+    if (!code && info.type === 'svg' && /^data:image\/svg/i.test(value)) {
+      code = decodeDataSvg(value);
+    }
     return {
       url: value, source, ...info,
       confidence: extra.confidence || '중간',
-      code: extra.code,
+      code,
       element: extra.element || null,
       width: extra.width || extra.element?.naturalWidth || extra.element?.videoWidth || 0,
       height: extra.height || extra.element?.naturalHeight || extra.element?.videoHeight || 0,
@@ -424,7 +441,8 @@
     return shadow;
   }
 
-  function isChromeImage(node, url) {
+  function isChromeImage(node, url, allowDirect = false) {
+    if (allowDirect) return false;
     if (siteProfile().skipChrome === false) return false;
     const src = url || node?.currentSrc || node?.src || '';
     if (/logo|favicon|image__logo|\/ci\/|brand[_-]?mark|sprite\.(?:png|gif|svg)/i.test(src)) return true;
@@ -435,12 +453,23 @@
 
   function mediaAtPoint(x, y) {
     const stack = document.elementsFromPoint(x, y).filter(node => node !== state.host && !node.closest?.('#sl-host'));
+    const isSvgLikeNode = (node) => {
+      if (!node) return false;
+      const tag = (node.tagName || '').toUpperCase();
+      if (tag === 'SVG') return true;
+      if (tag === 'IMG') {
+        const src = node.currentSrc || node.src || node.getAttribute?.('src') || '';
+        if (/^data:image\/svg/i.test(src) || /\.svg(?:$|[?#])/i.test(src)) return true;
+      }
+      return false;
+    };
     const hitRect = (node, pad = 0) => {
       const r = node.getBoundingClientRect();
-      return r.width >= 24 && r.height >= 24
+      const min = isSvgLikeNode(node) ? 8 : 24;
+      return r.width >= min && r.height >= min
         && x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad;
     };
-    const imgsUnder = $$('img').filter(img => !img.closest?.('#sl-host') && !isChromeImage(img) && hitRect(img, 4))
+    const imgsUnder = $$('img').filter(img => !img.closest?.('#sl-host') && (!isChromeImage(img) || stack.includes(img)) && hitRect(img, 4))
       .sort((a, b) => {
         const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
         return (ra.width * ra.height) - (rb.width * rb.height);
@@ -448,7 +477,7 @@
     if (imgsUnder.length) {
       const small = imgsUnder[0];
       const sr = small.getBoundingClientRect();
-      if (sr.width < 80 || sr.height < 80) {
+      if (!isSvgLikeNode(small) && (sr.width < 80 || sr.height < 80)) {
         const large = imgsUnder.find(img => {
           const r = img.getBoundingClientRect();
           return r.width >= 120 && r.height >= 120;
@@ -460,15 +489,31 @@
     const videosUnder = $$('video').filter(v => !v.closest?.('#sl-host') && hitRect(v));
     if (videosUnder[0]) return videosUnder[0];
     const svgsUnder = $$('svg').filter(s => !s.closest?.('#sl-host') && hitRect(s, 2));
-    if (svgsUnder[0] && !imgsUnder.length) return svgsUnder[0];
+    if (svgsUnder[0] && (!imgsUnder.length || (isSvgLikeNode(imgsUnder[0]) === false && stack.includes(svgsUnder[0])))) return svgsUnder[0];
+
+    // Check if any element directly under cursor has a background or mask with SVG
+    for (const node of stack) {
+      if (!node || node === state.host || node.closest?.('#sl-host')) continue;
+      try {
+        const cs = getComputedStyle(node);
+        const bg = cs.backgroundImage || '';
+        const mask = cs.maskImage || cs.webkitMaskImage || '';
+        if (/url\(\s*["']?(?:data:image\/svg|\S+\.svg)/i.test(bg + mask)) {
+          return node;
+        }
+      } catch {}
+    }
+
     const found = [];
     for (const node of stack) {
       const media = node.tagName && /^(IMG|VIDEO|SVG|PICTURE)$/.test(node.tagName)
         ? node
         : node.closest?.('img, video, svg, picture');
-      if (!media || found.includes(media) || isChromeImage(media)) continue;
+      if (!media || found.includes(media) || (isChromeImage(media) && !stack.includes(media))) continue;
       const r = media.getBoundingClientRect();
-      if (media.tagName !== 'SVG' && (r.width < 24 || r.height < 24)) continue;
+      const isSvg = isSvgLikeNode(media) || media.tagName === 'SVG';
+      if (!isSvg && (r.width < 24 || r.height < 24)) continue;
+      if (isSvg && (r.width < 8 || r.height < 8)) continue;
       found.push(media);
     }
     if (found[0]) return found[0];
@@ -597,18 +642,22 @@
     const bestW = best ? srcsetWidth(node.srcset || node.getAttribute('srcset') || '', best) : 0;
     const displayPx = Math.max(node.naturalWidth || 0, node.naturalHeight || 0, itemPixel({ url: abs(display) }));
     const pick = best && (bestW > displayPx || itemPixel({ url: abs(best) }) > displayPx || !display) ? best : display;
+    const isSvg = /\.svg(?:$|[?#])|^data:image\/svg/i.test(pick);
     if (pick) {
-      out.push(candidate(pick, pick === best ? 'srcset 최대' : 'img.currentSrc', 'image', {
+      out.push(candidate(pick, pick === best ? 'srcset 최대' : 'img.currentSrc', isSvg ? 'svg' : 'image', {
         element: media, confidence: '최상', allowJunk: true,
         width: pick === best && bestW ? bestW : 0,
         height: pick === best && bestW && node.naturalWidth ? Math.round(bestW * node.naturalHeight / node.naturalWidth) : 0
       }));
     }
     const lazySet = largestSrcset(node.getAttribute('data-srcset') || '');
-    if (lazySet) out.push(candidate(lazySet, '속성:data-srcset', 'image', { element: media, confidence: '높음' }));
+    if (lazySet) out.push(candidate(lazySet, '속성:data-srcset', /\.svg(?:$|[?#])|^data:image\/svg/i.test(lazySet) ? 'svg' : 'image', { element: media, confidence: '높음' }));
     ['data-src', 'data-original', 'data-full', 'data-full-url', 'data-lazy-src', 'data-zoom-image',
       'data-origin', 'data-url', 'data-image', 'data-img', 'data-orig-file', 'data-lazy', 'org_src'].forEach(attr => {
-      out.push(candidate(node.getAttribute(attr), `속성:${attr}`, 'image', { element: media, confidence: '중간' }));
+      const val = node.getAttribute(attr);
+      if (val) {
+        out.push(candidate(val, `속성:${attr}`, /\.svg(?:$|[?#])|^data:image\/svg/i.test(val) ? 'svg' : 'image', { element: media, confidence: '중간' }));
+      }
     });
   }
 
@@ -621,13 +670,16 @@
     if (!media) {
       let cur = target;
       for (let i = 0; i < 6 && cur; i++) {
-        const bg = getComputedStyle(cur).backgroundImage || '';
+        let cs;
+        try { cs = getComputedStyle(cur); } catch {}
+        const bg = cs ? `${cs.backgroundImage || ''} ${cs.maskImage || ''} ${cs.webkitMaskImage || ''}` : '';
         const re = /url\(\s*["']?([^"')]+?)["']?\s*\)/g;
         let match;
         while ((match = re.exec(bg))) {
           const u = abs(match[1]);
-          if (!u || (/^data:/i.test(u) && !/^data:image\/svg/i.test(u)) || isChromeImage(cur, u)) continue;
-          out.push(candidate(u, '배경 이미지', /\.svg(?:$|[?#])|^data:image\/svg/i.test(u) ? 'svg' : 'image', { confidence: '최상', element: cur }));
+          const isSvg = /\.svg(?:$|[?#])|^data:image\/svg/i.test(u);
+          if (!u || (/^data:/i.test(u) && !isSvg) || isChromeImage(cur, u, cur === target)) continue;
+          out.push(candidate(u, '배경 이미지', isSvg ? 'svg' : 'image', { confidence: '최상', element: cur }));
         }
         if (out.filter(Boolean).length) return { media: cur, candidates: out.filter(Boolean) };
         cur = cur.parentElement;
@@ -688,7 +740,7 @@
     let match;
     while ((match = re.exec(String(value || '')))) {
       const url = abs(match[1]);
-      if (url && !/^data:/i.test(url) && !urls.includes(url)) urls.push(url);
+      if (url && (!/^data:/i.test(url) || /^data:image\/svg/i.test(url)) && !urls.includes(url)) urls.push(url);
     }
     return urls;
   }
@@ -1033,14 +1085,14 @@
     });
     deepAll('img, object, embed').forEach(node => {
       const url = abs(node.currentSrc || node.src || node.getAttribute?.('src') || node.getAttribute?.('data') || '');
-      if (!url || !/\.svg(?:$|[?#])/i.test(url) || node.closest?.('#sl-host')) return;
+      if (!url || (!/\.svg(?:$|[?#])/i.test(url) && !/^data:image\/svg/i.test(url)) || node.closest?.('#sl-host')) return;
       if (isUiSvg(node, url, fileName(url))) return;
       let path = url;
       try { path = new URL(url).pathname; } catch { /* keep */ }
       if (seen.has(path)) return;
       seen.add(path);
       out.push(candidate(url, '페이지 SVG', 'svg', {
-        element: node, confidence: '높음', relation: 'page', name: fileName(url), fp: path
+        element: node, confidence: '높음', relation: 'page', name: fileName(url) || 'svg', fp: path
       }));
     });
     return out.slice(0, 80);
@@ -3243,7 +3295,7 @@
     state.analysis = analysis;
     const tag = (collected.media?.tagName || target?.tagName || '').toUpperCase();
     const clickedVideo = tag === 'VIDEO';
-    const clickedSvg = tag === 'SVG';
+    const clickedSvg = tag === 'SVG' || collected.candidates.some(c => c.type === 'svg' && (c.element === target || c.element === collected.media || c.relation === 'target'));
     const fontCandidates = !clickedVideo && !clickedSvg && analysis?.text ? collectPageFonts() : [];
     state.selectedMedia = clickedVideo ? collected.media : null;
     state.postUrl = postUrl(target);

@@ -40,6 +40,14 @@ test('classifyUrl basics', () => {
   assert.strictEqual(SL.classifyUrl('https://x.com/a.jpg').type, 'image');
   assert.ok(SL.classifyUrl('https://x.com/a.m3u8').stream);
   assert.strictEqual(SL.classifyUrl('data:image/svg+xml,<svg/>').type, 'svg');
+  assert.strictEqual(SL.classifyUrl('data:image/svg+xml;utf8,<svg viewBox="0 0 96.0675 19.1101"/>').type, 'svg');
   assert.strictEqual(SL.classifyUrl('https://x.com/fonts/ui.woff2').type, 'font');
   assert.strictEqual(SL.classifyUrl('https://x.com/font', 'font').type, 'font');
 });
+
+test('isImageUrl handles SVG data URIs correctly', () => {
+  assert.strictEqual(SL.isImageUrl('data:image/svg+xml,<svg viewBox="0 0 96 19"/>'), false);
+  assert.strictEqual(SL.isImageUrl('https://example.com/icon.svg'), false);
+  assert.strictEqual(SL.isImageUrl('https://example.com/photo.jpg'), true);
+});
+

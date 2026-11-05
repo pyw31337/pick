@@ -205,7 +205,7 @@
   SL.isImageUrl = function isImageUrl(url, mime) {
     if (mime && /^image\//i.test(mime) && !/^image\/(svg|gif)/i.test(mime)) return true;
     if (!url || SL.isUiJunk(url)) return false;
-    if (/\.svg(?:$|[?#])/i.test(url)) return false;
+    if (/\.svg(?:$|[?#])/i.test(url) || /^data:image\/svg/i.test(url)) return false;
     if (SL.PHOTO_EXT.test(url)) return true;
     if (/_(?:n|o)\.(?:jpe?g|png|webp)/i.test(url)) return true;
     if (/[?&]stp=/i.test(url) && !SL.MEDIA_EXT.test(url)) return true;
