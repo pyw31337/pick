@@ -73,9 +73,33 @@ function exec(tabId, details) {
   });
 }
 
+function originPattern(url) {
+  try {
+    const u = new URL(url);
+    return /^https?:$/.test(u.protocol) ? `${u.protocol}//${u.hostname}/*` : '';
+  } catch { return ''; }
+}
+
+function hasSiteAccess(tab) {
+  const origin = originPattern(tab?.url || '');
+  if (!origin) return Promise.resolve(false);
+  return new Promise(resolve => api.permissions.contains({ origins: [origin] }, ok => resolve(!!ok)));
+}
+
+async function ensureSiteAccess(tab, request) {
+  const origin = originPattern(tab?.url || '');
+  if (!origin) throw new Error('분석할 수 없는 페이지예요');
+  if (await hasSiteAccess(tab)) return true;
+  if (!request) return false;
+  const allowed = await new Promise(resolve => api.permissions.request({ origins: [origin] }, ok => resolve(!!ok)));
+  if (!allowed) throw new Error('이 사이트 분석 권한이 필요해요');
+  return true;
+}
+
 const listInFrame = () => (typeof window.__sourceLensList === 'function' ? window.__sourceLensList() : null);
 
-async function collect(tab) {
+async function collect(tab, requestAccess = false) {
+  if (!await ensureSiteAccess(tab, requestAccess)) throw new Error('site-permission-needed');
   let run = await exec(tab.id, { func: listInFrame });
   if (run.error && !run.results.length) throw new Error(run.error);
   if (!run.results.some(r => r && r.result)) {
@@ -113,9 +137,12 @@ async function collectOpenTabs() {
   const merged = { images: [], videos: [], svgs: [], fonts: [] };
   const seen = new Set();
   const errors = [];
+  const allowedPages = [];
   for (const tab of pages) {
     try {
+      if (!await hasSiteAccess(tab)) { errors.push(`${tab.title || tab.url}: 이 사이트는 아직 허용하지 않음`); continue; }
       const data = await collect(tab);
+      allowedPages.push(tab);
       ['images', 'videos', 'svgs', 'fonts'].forEach(kind => (data[kind] || []).forEach(item => {
         const key = `${kind}:${keyOf(item)}`;
         if (seen.has(key)) return;
@@ -127,7 +154,7 @@ async function collectOpenTabs() {
     }
   }
   merged.images.sort((a, b) => (b.px || 0) - (a.px || 0));
-  return { ...merged, videoLocked: false, pages: pages.length, errors };
+  return { ...merged, videoLocked: false, pages: allowedPages.length, errors };
 }
 
 function rememberPopupHistory(tab, data) {
@@ -458,7 +485,7 @@ async function saveItems(items) {
   setStatus(parts.join(' · '), fail && !ok ? 'error' : '');
 }
 
-async function load() {
+async function load(requestAccess = false) {
   setStatus('');
   $('#count').textContent = '찾는 중…';
   const tab = await activeTab();
@@ -478,6 +505,14 @@ async function load() {
   }
   ['#openPanel', '#oneClickVideo', '#designAudit'].forEach(sel => { $(sel).disabled = false; });
   try {
+    const allowed = await ensureSiteAccess(tab, requestAccess);
+    if (!allowed) {
+      state.data = { images: [], videos: [], svgs: [], fonts: [] }; render();
+      $('#list').innerHTML = '<p class="empty">아직 이 사이트를 읽지 않아요. <b>↻ 분석 허용</b>을 누르면 현재 사이트에만 권한을 주고 분석합니다.</p>';
+      $('#refresh').title = '이 사이트 분석 허용'; $('#refresh').setAttribute('aria-label', '이 사이트 분석 허용'); $('#count').textContent = '사이트별 허용 방식';
+      return;
+    }
+    $('#refresh').title = '다시 찾기'; $('#refresh').setAttribute('aria-label', '다시 찾기');
     const data = await collect(tab);
     state.data = data;
     state.videoLocked = data.videoLocked;
@@ -492,11 +527,12 @@ async function load() {
   } catch (error) {
     state.data = { images: [], videos: [], svgs: [], fonts: [] };
     render();
-    setStatus(`이 페이지를 읽지 못했습니다. 페이지를 새로고침(Cmd+R / F5)한 뒤 다시 열어 주세요. (${error.message || error})`, 'error');
+    const message = error.message || error;
+    setStatus(message === 'site-permission-needed' ? '↻를 눌러 현재 사이트 분석을 허용해 주세요.' : `이 페이지를 읽지 못했습니다. 페이지를 새로고침(Cmd+R / F5)한 뒤 다시 열어 주세요. (${message})`, 'error');
   }
 }
 
-$('#refresh').onclick = load;
+$('#refresh').onclick = () => load(true);
 $('#collectTabs').onclick = async () => {
   setStatus('열린 탭을 수집하는 중…');
   $('#collectTabs').disabled = true;
@@ -592,6 +628,7 @@ $('#zip').onclick = () => {
 $('#openPanel').onclick = async () => {
   const tab = state.tab || await activeTab();
   if (!tab) return;
+  try { await collect(tab, true); } catch (error) { return setStatus(error.message || '현재 사이트 권한을 허용해 주세요.', 'error'); }
   const tabName = state.view === 'svgs' ? 'svg' : state.view === 'fonts' ? 'font' : ({ images: 'image', videos: 'video' }[state.view]);
   api.tabs.sendMessage(tab.id, { type: 'openPanel', tab: tabName }, { frameId: 0 }, () => {
     if (api.runtime.lastError) {
@@ -604,6 +641,7 @@ $('#openPanel').onclick = async () => {
 $('#designAudit').onclick = async () => {
   const tab = state.tab || await activeTab();
   if (!tab) return;
+  try { await collect(tab, true); } catch (error) { return setStatus(error.message || '현재 사이트 권한을 허용해 주세요.', 'error'); }
   api.tabs.sendMessage(tab.id, { type: 'openPanel', tab: 'design' }, { frameId: 0 }, () => {
     if (api.runtime.lastError) {
       setStatus('페이지에 연결하지 못했습니다. 페이지를 새로고침한 뒤 다시 눌러 주세요.', 'error');
@@ -615,6 +653,7 @@ $('#designAudit').onclick = async () => {
 $('#oneClickVideo').onclick = async () => {
   const tab = state.tab || await activeTab();
   if (!tab) return;
+  try { await collect(tab, true); } catch (error) { return setStatus(error.message || '현재 사이트 권한을 허용해 주세요.', 'error'); }
   setStatus('영상 저장 준비 중…');
   api.tabs.sendMessage(tab.id, { type: 'oneClickVideo' }, { frameId: 0 }, result => {
     void api.runtime.lastError;

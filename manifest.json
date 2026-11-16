@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Let's Pick",
   "short_name": "Let's Pick",
-  "version": "1.4.13",
-  "description": "페이지의 이미지·영상·SVG·글꼴 원본을 찾고, 렌더링된 디자인 토큰과 일관성까지 분석하는 Let's Pick.",
+  "version": "1.5.0",
+  "description": "사용자가 분석을 시작한 현재 사이트에서만 이미지·영상·SVG·글꼴 원본과 디자인 토큰을 찾는 Let's Pick.",
   "permissions": [
     "contextMenus",
     "webRequest",
@@ -11,17 +11,10 @@
     "scripting",
     "downloads",
     "tabs",
-    "activeTab",
-    "declarativeNetRequest",
-    "declarativeNetRequestWithHostAccess"
+    "activeTab"
   ],
-  "host_permissions": ["<all_urls>"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": { "service_worker": "service-worker.js" },
-  "declarative_net_request": {
-    "rule_resources": [
-      { "id": "referer", "enabled": true, "path": "dnr.json" }
-    ]
-  },
   "action": {
     "default_title": "Let's Pick — 이미지·영상·SVG 원본 찾기",
     "default_popup": "popup.html",
@@ -32,34 +25,6 @@
       "128": "icon-128.png"
     }
   },
-  "content_scripts": [
-    {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["inject-main.js"],
-      "run_at": "document_start",
-      "all_frames": true,
-      "match_about_blank": true,
-      "match_origin_as_fallback": true,
-      "world": "MAIN"
-    },
-    {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["shared.js", "platform-profiles.js", "extractors.js"],
-      "run_at": "document_idle",
-      "all_frames": true,
-      "match_about_blank": true,
-      "match_origin_as_fallback": true,
-      "world": "MAIN"
-    },
-    {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["shared.js", "platform-profiles.js", "media-tools.js", "video-finder.js", "content.js"],
-      "run_at": "document_start",
-      "all_frames": true,
-      "match_about_blank": true,
-      "match_origin_as_fallback": true
-    }
-  ],
   "web_accessible_resources": [
     {
       "resources": ["content.css"],

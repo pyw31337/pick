@@ -468,7 +468,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 function injectContent(tabId, frameIds) {
-  const target = frameIds ? { tabId, frameIds } : { tabId };
+  const target = frameIds ? { tabId, frameIds } : { tabId, allFrames: true };
   return new Promise(resolve => {
     chrome.scripting.executeScript({ target, files: ['inject-main.js', 'shared.js', 'platform-profiles.js', 'extractors.js'], world: 'MAIN' }, () => {
       void chrome.runtime.lastError;
@@ -479,9 +479,35 @@ function injectContent(tabId, frameIds) {
   });
 }
 
+function originPattern(url) {
+  try {
+    const u = new URL(url);
+    return /^https?:$/.test(u.protocol) ? `${u.protocol}//${u.hostname}/*` : '';
+  } catch { return ''; }
+}
+
+function hasOriginPermission(origin) {
+  return new Promise(resolve => chrome.permissions.contains({ origins: [origin] }, ok => resolve(!!ok)));
+}
+
+function askOriginPermission(origin) {
+  return new Promise(resolve => chrome.permissions.request({ origins: [origin] }, ok => resolve(!!ok)));
+}
+
+async function ensureTabAccess(tab) {
+  const origin = originPattern(tab?.url || '');
+  if (!origin) return false;
+  if (await hasOriginPermission(origin)) return true;
+  // A context-menu or shortcut click is an explicit user action. If Chrome rejects
+  // the request there, the popup gives the same site-only choice again.
+  return askOriginPermission(origin);
+}
+
 // Sends a message to the page; if the content script is missing (tab opened before
 // the extension was installed/reloaded), injects it once and retries.
-function sendToTab(tabId, payload, frameId) {
+async function sendToTab(tabId, payload, frameId) {
+  const tab = await new Promise(resolve => chrome.tabs.get(tabId, value => resolve(chrome.runtime.lastError ? null : value)));
+  if (!await ensureTabAccess(tab)) return { ok: false, error: 'site-permission-needed' };
   const options = frameId == null ? {} : { frameId };
   return new Promise(resolve => {
     chrome.tabs.sendMessage(tabId, payload, options, response => {
@@ -496,25 +522,7 @@ function sendToTab(tabId, payload, frameId) {
   });
 }
 
-// After install/update, tabs that were already open still run the old (disconnected) copy, so Alt(⌥)+click
-// silently did nothing until the tab was refreshed. Put the new copy into every open tab right away.
-async function injectIntoOpenTabs() {
-  let tabs = [];
-  try { tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] }); } catch { return; }
-  for (const tab of tabs) {
-    if (tab.discarded || !tab.id) continue;
-    const target = { tabId: tab.id, allFrames: true };
-    try {
-      await chrome.scripting.executeScript({ target, files: ['inject-main.js', 'shared.js', 'platform-profiles.js', 'extractors.js'], world: 'MAIN' });
-    } catch { /* restricted page */ }
-    try {
-      await chrome.scripting.executeScript({ target, files: ['shared.js', 'platform-profiles.js', 'media-tools.js', 'video-finder.js', 'content.js'] });
-    } catch { /* restricted page */ }
-  }
-}
-
 chrome.runtime.onInstalled.addListener(details => {
-  if (details?.reason === 'install' || details?.reason === 'update') injectIntoOpenTabs();
   if (!chrome.contextMenus) return;
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
